@@ -1,0 +1,24 @@
+# Автоопределение текстовых файлов и принудительная нормализация в репозитории.
+# В working tree на Windows остаётся CRLF (через core.autocrlf=true),
+# в git-объектах (и на GitHub) хранится LF — чистые diff без «изменилась каждая строка».
+* text=auto eol=lf
+
+# Явно текстовые форматы проекта
+*.js   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.txt  text eol=lf
+*.sh   text eol=lf
+
+# Бинарные файлы — нормализация переносов не нужна
+*.xlsx binary
+*.xls  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
