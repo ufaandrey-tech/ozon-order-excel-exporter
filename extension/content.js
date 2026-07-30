@@ -1,18 +1,8 @@
-// ==UserScript==
-// @name         📋 Ozon Order Copier v9.12 (мульти-отправления + COMPOSER_ACTION)
-// @namespace    http://tampermonkey.net/
-// @version      9.13
-// @description  Копирует заказы Ozon v9.12: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
-// @author       Volunteer Helper
-// @match        https://www.ozon.ru/my/orderlist*
-// @match        https://ozon.ru/my/orderlist*
-// @icon         https://www.ozon.ru/favicon.ico
-// @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
-// @grant        GM_setClipboard
-// @grant        GM_addStyle
-// @connect      ir.ozone.ru
-// @connect      cdn1.ozon.ru
-// ==/UserScript==
+// ================================================================
+// Ozon Order Copier — Chrome Extension (Manifest V3)
+// Портировано из Tampermonkey-скрипта v9.13
+// ExcelJS загружается через manifest.json → content_scripts.js
+// ================================================================
 
 (function() {
     'use strict';
@@ -20,7 +10,7 @@
     // ============================================================
     // 1. СТИЛИ
     // ============================================================
-    GM_addStyle(`
+    const STYLE_CSS = `
         .ozon-copy-btn {
             position: fixed !important;
             bottom: 24px !important;
@@ -123,7 +113,8 @@
         .ozon-copy-counter {
             position: fixed !important;
             bottom: 80px !important;
-            right: 24px !important;
+            left: 24px !important;
+            right: auto !important;
             z-index: 999998 !important;
             background: #fff !important;
             border-radius: 12px !important;
@@ -174,7 +165,8 @@
         .ozon-copy-progress {
             position: fixed !important;
             bottom: 80px !important;
-            right: 24px !important;
+            left: 24px !important;
+            right: auto !important;
             z-index: 999998 !important;
             background: #fff !important;
             border-radius: 12px !important;
@@ -197,6 +189,18 @@
         }
         @keyframes ozon-spin {
             to { transform: rotate(360deg); }
+        }
+
+        /* На узких экранах — предпросмотр и прогресс над кнопками, иначе перекрываются */
+        @media (max-width: 700px) {
+            .ozon-copy-counter,
+            .ozon-copy-progress {
+                left: 24px !important;
+                right: 24px !important;
+                bottom: 200px !important;
+                min-width: auto !important;
+                max-width: none !important;
+            }
         }
         .ozon-diag-btn {
             position: fixed !important;
@@ -239,7 +243,10 @@
             background: #f44336 !important;
             box-shadow: 0 4px 20px rgba(244, 67, 54, 0.4) !important;
         }
-    `);
+    `;
+    const styleEl = document.createElement('style');
+    styleEl.textContent = STYLE_CSS;
+    document.head.appendChild(styleEl);
 
     // ============================================================
     // 1b. ДИАГНОСТИЧЕСКИЙ МОДУЛЬ
@@ -2100,11 +2107,12 @@
     // ============================================================
     // 11. КОПИРОВАНИЕ
     // ============================================================
-    function copyToClipboard(text) {
+    async function copyToClipboard(text) {
         try {
-            GM_setClipboard(text, 'text');
+            await navigator.clipboard.writeText(text);
             return true;
         } catch(e) {
+            // Fallback для случаев, когда clipboard API недоступен
             try {
                 const ta = document.createElement('textarea');
                 ta.value = text;
@@ -2182,6 +2190,13 @@
         const btn = document.querySelector('.ozon-copy-btn');
         if (!btn) return;
 
+        // Синхронно создаём textarea ПОКА действует пользовательский жест (клик).
+        // После await-а user activation теряется, и clipboard API падает с NotAllowedError.
+        const clipTA = document.createElement('textarea');
+        clipTA.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;';
+        document.body.appendChild(clipTA);
+        clipTA.focus();
+
         btn.classList.add('ozon-copy-btn--loading');
         btn.innerHTML = '⏳ Анализирую...';
 
@@ -2190,7 +2205,6 @@
             const orders = parseOrders();
 
             // Шаг 1.5: Дедупликация — Ozon может показывать один заказ в нескольких карточках
-            // (разные отправления). Оставляем только первое вхождение каждого orderNumber.
             const seenNumbers = new Set();
             const deduped = [];
             for (const o of orders) {
@@ -2200,13 +2214,13 @@
                 }
             }
             if (deduped.length < orders.length) {
-                const removed = orders.length - deduped.length;
-                console.log(`[Ozon Copier] Удалено дублей: ${removed}`);
+                console.log(`[Ozon Copier] Удалено дублей: ${orders.length - deduped.length}`);
             }
             orders.length = 0;
             orders.push(...deduped);
 
             if (orders.length === 0) {
+                document.body.removeChild(clipTA);
                 btn.classList.remove('ozon-copy-btn--loading');
                 btn.classList.add('ozon-copy-btn--error');
                 btn.innerHTML = '❌ Не найдено';
@@ -2229,9 +2243,24 @@
             // Шаг 3: Итоговый предпросмотр
             showPreview(orders);
 
-            // Шаг 4: Форматируем и копируем
+            // Шаг 4: Форматируем и копируем — используем заранее созданную textarea
             const tsv = formatTSV(orders);
-            const ok = copyToClipboard(tsv);
+            clipTA.value = tsv;
+            clipTA.focus();
+            clipTA.select();
+
+            let ok = false;
+            try {
+                // execCommand('copy') — основной метод, не триггерит индикатор буфера Chrome
+                ok = document.execCommand('copy');
+            } catch(_) {}
+            if (!ok) {
+                try {
+                    await navigator.clipboard.writeText(tsv);
+                    ok = true;
+                } catch(_) {}
+            }
+            document.body.removeChild(clipTA);
 
             if (ok) {
                 btn.classList.remove('ozon-copy-btn--loading');
@@ -2239,9 +2268,7 @@
                 const totalItems = orders.reduce((s, o) => s + ((o.items && o.items.length) || 0), 0);
                 btn.innerHTML = `✅ ${orders.length} заказов, ${totalItems} товаров`;
 
-                let msg = `✅ Скопировано: ${orders.length} заказов, ${totalItems} товаров\n📋 Вставьте: Ctrl+V`;
-
-                showToast(msg, 'success');
+                showToast(`✅ Скопировано: ${orders.length} заказов, ${totalItems} товаров\n📋 Вставьте: Ctrl+V`, 'success');
 
                 setTimeout(() => {
                     btn.classList.remove('ozon-copy-btn--success');
@@ -2251,6 +2278,8 @@
                 throw new Error('Copy failed');
             }
         } catch(err) {
+            // Подчищаем textarea при ошибке
+            if (clipTA.parentNode) document.body.removeChild(clipTA);
             console.error('[Ozon Copier] Error:', err);
             btn.classList.remove('ozon-copy-btn--loading');
             btn.classList.add('ozon-copy-btn--error');
