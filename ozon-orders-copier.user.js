@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.12 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.13 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
 // @version      9.13
-// @description  Копирует заказы Ozon v9.12: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @description  Копирует заказы Ozon v9.13: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
@@ -251,7 +251,7 @@
     //   - parseResults[]:   заказ → поле → ожидаемый путь → фактическое значение → OK/FAIL
     //   - imageLogs[]:      url → HTTP-статус → байты → результат вставки в Excel
     // ============================================================
-    const SCRIPT_VERSION = '9.12';
+    const SCRIPT_VERSION = '9.13';
     const Diagnostics = {
         enabled: false,
         errors: [],
@@ -3067,7 +3067,7 @@
         diagBtn.addEventListener('click', exportDiagnostics);
         document.body.appendChild(diagBtn);
 
-        console.log('[Ozon Copier v9.10] Кнопки добавлены');
+        console.log('[Ozon Copier v9.13] Кнопки добавлены');
     }
 
     // ============================================================

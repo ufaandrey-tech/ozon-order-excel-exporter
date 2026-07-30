@@ -258,7 +258,7 @@
     //   - parseResults[]:   заказ → поле → ожидаемый путь → фактическое значение → OK/FAIL
     //   - imageLogs[]:      url → HTTP-статус → байты → результат вставки в Excel
     // ============================================================
-    const SCRIPT_VERSION = '9.12';
+    const SCRIPT_VERSION = '9.13';
     const Diagnostics = {
         enabled: false,
         errors: [],
@@ -3096,7 +3096,7 @@
         diagBtn.addEventListener('click', exportDiagnostics);
         document.body.appendChild(diagBtn);
 
-        console.log('[Ozon Copier v9.10] Кнопки добавлены');
+        console.log('[Ozon Copier v9.13] Кнопки добавлены');
     }
 
     // ============================================================
