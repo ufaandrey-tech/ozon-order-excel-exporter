@@ -1,6 +1,6 @@
 // ================================================================
 // Ozon Order Copier — Chrome Extension (Manifest V3)
-// Портировано из Tampermonkey-скрипта v9.13
+// Портировано из Tampermonkey-скрипта v9.14
 // ExcelJS загружается через manifest.json → content_scripts.js
 // ================================================================
 
@@ -408,6 +408,10 @@
             'в пути': '🚚 В пути',
             'передан': '🚚 Передан в доставку',
             'передан в доставку': '🚚 Передан в доставку',
+            'передаётся в доставку': '🚚 Передаётся в доставку',
+            'передается в доставку': '🚚 Передаётся в доставку',
+            'передаётся': '🚚 Передаётся в доставку',
+            'передается': '🚚 Передаётся в доставку',
             'собирается': '📦 Собирается',
             'собираем': '📦 Собирается',
             'обрабатывается': '📦 Обрабатывается',
@@ -425,6 +429,7 @@
 
         if (t.includes('можно забирать')) return '📦 Готов к выдаче';
         if (t.includes('в пути')) return '🚚 В пути';
+        if (t.includes('передаётся') || t.includes('передается')) return '🚚 Передаётся в доставку';
         if (t.includes('отмен')) return '❌ Отменён';
         if (t.includes('доставлен') || t.includes('получен')) return '✅ Доставлен';
         if (t.includes('собираем')) return '📦 Собирается';
@@ -2417,7 +2422,7 @@
                 { width: 20 }, // A: № Заказа
                 { width: 24 }, // B: Статус доставки
                 { width: 55 }, // C: Товары
-                { width: 10 }, // D: Кол-во
+                { width: 22 }, // D: Кол-во
                 { width: 13 }, // E: Сумма
                 { width: 22 }, // F: Статус оплаты
                 { width: 28 }, // G: Пункт выдачи
@@ -2430,7 +2435,7 @@
 
             // Данные
             let row = 2;
-            const IMG_HEIGHT = 100; // px — высота картинки в ячейке
+            const IMG_HEIGHT = 60; // px — высота картинки в ячейке
 
             deduped.forEach(o => {
                 const hasItems = o.items && o.items.length > 0;
@@ -2481,6 +2486,7 @@
                     ws.getCell(row, 3).value = name;
                     ws.getCell(row, 4).value = qtyNum;
                     ws.getCell(row, 5).value = price;
+                    ws.getCell(row, 5).numFmt = '#,##0.00';
                     ws.getCell(row, 6).value = pay;
                     ws.getCell(row, 7).value = o.pickupPoint;
 
@@ -2512,8 +2518,13 @@
                     }
 
                     // Стили для строки (9 колонок)
+                    const isEvenRow = (row % 2 === 0);
+                    const rowFill = isEvenRow
+                        ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F2F7FB' } }
+                        : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF' } };
                     for (let c = 1; c <= 9; c++) {
                         const cell = ws.getCell(row, c);
+                        cell.fill = rowFill;
                         cell.border = {
                             top: { style: 'thin' }, bottom: { style: 'thin' },
                             left: { style: 'thin' }, right: { style: 'thin' }
@@ -2531,18 +2542,59 @@
             // Автофильтр
             ws.autoFilter = { from: 'A1', to: `I${row - 1}` };
 
+            // Условное форматирование по статусам доставки (колонка B — 8 статусов)
+            const lastDataRow = row - 1;
+            if (lastDataRow >= 2) {
+                ws.addConditionalFormatting({
+                    ref: `B2:B${lastDataRow}`,
+                    rules: [
+                        //  Зелёные: Доставлен, Готов к выдаче
+                        { type: 'containsText', operator: 'containsText', text: 'Доставлен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                        { type: 'containsText', operator: 'containsText', text: 'Готов к выдаче', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                        //  Жёлтые: Передаётся, Передан, В пути
+                        { type: 'containsText', operator: 'containsText', text: 'Передаётся', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                        { type: 'containsText', operator: 'containsText', text: 'Передан', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                        { type: 'containsText', operator: 'containsText', text: 'В пути', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                        //  Красно-розовый: Отменён
+                        { type: 'containsText', operator: 'containsText', text: 'Отменён', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
+                        //  Серо-голубой: Собирается, Обрабатывается
+                        { type: 'containsText', operator: 'containsText', text: 'Собирается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
+                        { type: 'containsText', operator: 'containsText', text: 'Обрабатывается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
+                    ]
+                });
+            }
+
+            // Условное форматирование по статусам оплаты (колонка F)
+            ws.addConditionalFormatting({
+                ref: `F2:F${lastDataRow}`,
+                rules: [
+                    { type: 'containsText', operator: 'containsText', text: 'Оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Не оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'При получении', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Ожидает оплаты', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Частично', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Возврат', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'E4DFEC' } }, font: { color: { argb: '4F2F6C' } } } },
+                ]
+            });
+
             // Итоговая строка с формулой SUMIF (не учитывает отменённые)
-            const summaryRow = row + 1;
+            const summaryRow = row;
+            const summaryFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D6E4F0' } };
+            ws.mergeCells(summaryRow, 4, summaryRow, 5);
             ws.getCell(summaryRow, 4).value = 'ИТОГО (без отмен):';
-            ws.getCell(summaryRow, 4).font = { bold: true };
-            ws.getCell(summaryRow, 5).value = {
-                formula: `SUMIF(B2:B${row - 1},"<>❌ Отменён",E2:E${row - 1})`
+            ws.getCell(summaryRow, 4).font = { bold: true, size: 12 };
+            ws.getCell(summaryRow, 4).alignment = { horizontal: 'right', vertical: 'middle' };
+            ws.getCell(summaryRow, 4).fill = summaryFill;
+            ws.getCell(summaryRow, 5).fill = summaryFill;
+            ws.getCell(summaryRow, 6).value = {
+                formula: `SUMIF(B2:B${lastDataRow},"<>❌ Отменён",E2:E${lastDataRow})`
             };
-            ws.getCell(summaryRow, 5).font = { bold: true };
-            ws.getCell(summaryRow, 5).numFmt = '#,##0.00';
+            ws.getCell(summaryRow, 6).font = { bold: true, size: 12 };
+            ws.getCell(summaryRow, 6).numFmt = '#,##0.00';
+            ws.getCell(summaryRow, 6).fill = summaryFill;
             for (let c = 1; c <= 9; c++) {
                 ws.getCell(summaryRow, c).border = {
-                    top: { style: 'medium' }, bottom: { style: 'thin' },
+                    top: { style: 'double' }, bottom: { style: 'thin' },
                     left: { style: 'thin' }, right: { style: 'thin' }
                 };
             }
