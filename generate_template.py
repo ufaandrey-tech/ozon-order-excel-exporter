@@ -11,13 +11,22 @@
 """
 
 import os
+import sys
+
+# Windows-консоль (cp1251) не может вывести эмодзи — переключаем stdout на UTF-8.
+if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 from openpyxl import Workbook
 from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side, NamedStyle
 )
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.formatting.rule import CellIsRule
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
 
 # --- Конфигурация ---
 OUTPUT = "Ozon_Заказы_шаблон.xlsx"
@@ -34,10 +43,11 @@ BORDER_THIN = Border(
     bottom=Side(style='thin')
 )
 
-# Столбцы (ширина, название)
+# Столбцы (ширина, название) — единый словарь заголовков B1 (10 колонок).
+# K — служебная колонка со справкой (в автофильтр не входит).
 COLUMNS = [
-    ("Дата", 14),
-    ("№ Заказа Ozon", 18),
+    ("Дата заказа", 14),
+    ("№ Заказа", 18),
     ("Статус доставки", 24),
     ("Товары", 50),
     ("Кол-во", 10),
@@ -46,7 +56,6 @@ COLUMNS = [
     ("Пункт выдачи", 28),
     ("Дата доставки", 16),
     ("Фото", 40),
-    ("Примечание", 30),
 ]
 
 # Список статусов для выпадающих списков
@@ -84,11 +93,14 @@ def create_workbook():
         cell.border = BORDER_THIN
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
+    # Служебная колонка K со справкой (ширина ~40)
+    ws.column_dimensions['K'].width = 40
+
     # --- Фиксация шапки ---
     ws.freeze_panes = "A2"
 
-    # --- Автофильтр ---
-    ws.auto_filter.ref = f"A1:K1"
+    # --- Автофильтр A1:J (K — служебная, не фильтруется) ---
+    ws.auto_filter.ref = f"A1:J1"
 
     # --- Строка-подсказка (скрытая) ---
     ws.cell(row=2, column=1, value="Вставьте данные сюда (Ctrl+V)")
@@ -108,7 +120,7 @@ def create_workbook():
     ws.add_data_validation(dv_delivery)
     dv_delivery.add(f"C2:C1001")
 
-    # Статус оплаты (столбец F)
+    # Статус оплаты (столбец G)
     dv_payment = DataValidation(
         type="list",
         formula1=f'"{",".join(PAYMENT_STATUSES)}"',
@@ -122,13 +134,15 @@ def create_workbook():
     dv_payment.add(f"G2:G1001")
 
     # --- Условное форматирование ---
-    # Сумма > 0 — зелёный (оплачено)
     green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     green_font = Font(color="006100")
 
-    # Сумма <= 0 или пусто — светло-жёлтый (не оплачено) 
+    # Сумма <= 0 или пусто — светло-жёлтый (не оплачено)
     yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
     yellow_font = Font(color="9C5700")
+
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    red_font = Font(color="9C0006")
 
     # Столбец F (Сумма): если число > 0 — зелёный фон
     ws.conditional_formatting.add(
@@ -141,12 +155,23 @@ def create_workbook():
         )
     )
 
-    # Столбец F (Сумма): если 0 или пусто — жёлтый
+    # Столбец F (Сумма): если 0 — жёлтый
     ws.conditional_formatting.add(
         f"F2:F1001",
         CellIsRule(
             operator='lessThanOrEqual',
             formula=['0'],
+            fill=yellow_fill,
+            font=yellow_font
+        )
+    )
+
+    # Столбец F (Сумма): пустые ячейки — жёлтый (CellIsRule не покрывает пустые,
+    # добавляем FormulaRule с ISBLANK — B3 п.4)
+    ws.conditional_formatting.add(
+        f"F2:F1001",
+        FormulaRule(
+            formula=['ISBLANK(F2)'],
             fill=yellow_fill,
             font=yellow_font
         )
@@ -163,9 +188,7 @@ def create_workbook():
         )
     )
 
-    # Столбец G (Статус оплаты): содержит "❌" — красный
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    red_font = Font(color="9C0006")
+    # Столбец G (Статус оплаты): содержит "❌ Не оплачен" — красный
     ws.conditional_formatting.add(
         f"G2:G1001",
         CellIsRule(
@@ -176,7 +199,7 @@ def create_workbook():
         )
     )
 
-    # Столбец C (Статус доставки): содержит "✅" — зелёный
+    # Столбец C (Статус доставки): содержит "✅ Доставлен" — зелёный
     ws.conditional_formatting.add(
         f"C2:C1001",
         CellIsRule(
@@ -187,10 +210,9 @@ def create_workbook():
         )
     )
 
-    # --- Справка (столбец J) ---
-    ws.cell(row=1, column=10, value="🔥 Справка по формату")
-    ws.cell(row=1, column=10).font = Font(bold=True, size=11)
-    ws.column_dimensions['J'].width = 40
+    # --- Справка (столбец K) ---
+    ws.cell(row=1, column=11, value="🔥 Справка по формату")
+    ws.cell(row=1, column=11).font = Font(bold=True, size=11)
 
     help_text = [
         "Скопируйте данные через кнопку на сайте Ozon",
@@ -200,27 +222,30 @@ def create_workbook():
         "Номер заказа — только в первой строке.",
         "",
         "📌 Столбцы:",
-        "A — Дата (с префиксом ' — текст, Excel не сбивает)",
-        "B — Номер заказа Ozon (только в первой строке)",
+        "A — Дата заказа (заполняется автоматически, из статуса или fallback)",
+        "B — № Заказа (только в первой строке)",
         "C — Статус доставки (выпадающий список)",
         "D — Товары (каждый товар на своей строке)",
         "E — Кол-во (количество единиц товара, из корзины)",
         "F — Сумма (индивидуальная цена товара)",
-        "G — Статус оплаты (в каждой строке)",
+        "G — Статус оплаты (выпадающий список, в каждой строке)",
         "H — Пункт выдачи (в каждой строке)",
         "I — Дата доставки (ожидаемая, из shipment widget)",
         "J — Фото (ссылка на изображение товара с ozon.ru)",
-        "K — Примечание (можно заполнить вручную)",
         "",
         "💡 Советы:",
         "- Используйте автофильтр (▲ в шапке)",
         "- Общая сумма без отменённых: =СУММЕСЛИ(C:C;\"<>❌ Отменён\";F:F)",
         "- Количество заказов: =СЧЁТЗ(B:B)",
         "- Сводка по статусам: =СЧЁТЕСЛИ(C:C,\"✅ Доставлен\")",
+        "",
+        "⚠️ ВАЖНО (v9.15):",
+        "Старые шаблоны (11 колонок, «Примечание» в K) НЕ совместимы.",
+        "Используйте новый шаблон, созданный этим скриптом.",
     ]
     for i, line in enumerate(help_text, 2):
-        ws.cell(row=i, column=10, value=line)
-        ws.cell(row=i, column=10).font = Font(size=10, color="333333")
+        ws.cell(row=i, column=11, value=line)
+        ws.cell(row=i, column=11).font = Font(size=10, color="333333")
 
     # --- Сохранение ---
     wb.save(OUTPUT)

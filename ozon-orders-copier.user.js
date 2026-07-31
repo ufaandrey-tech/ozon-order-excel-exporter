@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.14 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.15 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.14
-// @description  Копирует заказы Ozon v9.14: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.15
+// @description  Копирует заказы Ozon v9.15: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
@@ -11,7 +11,16 @@
 // @grant        GM_setClipboard
 // @grant        GM_addStyle
 // @connect      ir.ozone.ru
+// @connect      ir.ozon.ru
 // @connect      cdn1.ozon.ru
+// @connect      cdn2.ozon.ru
+// @connect      cdn3.ozon.ru
+// @connect      cdn4.ozon.ru
+// @connect      cdn5.ozon.ru
+// @connect      cdn6.ozon.ru
+// @connect      cdn7.ozon.ru
+// @connect      cdn8.ozon.ru
+// @connect      cdn9.ozon.ru
 // ==/UserScript==
 
 (function() {
@@ -20,6 +29,8 @@
     // ============================================================
     // 1. СТИЛИ
     // ============================================================
+    // В Node (node --test) document отсутствует — стили не добавляем.
+    if (typeof document !== 'undefined') {
     GM_addStyle(`
         .ozon-copy-btn {
             position: fixed !important;
@@ -240,6 +251,7 @@
             box-shadow: 0 4px 20px rgba(244, 67, 54, 0.4) !important;
         }
     `);
+    }
 
     // ============================================================
     // 1b. ДИАГНОСТИЧЕСКИЙ МОДУЛЬ
@@ -251,7 +263,7 @@
     //   - parseResults[]:   заказ → поле → ожидаемый путь → фактическое значение → OK/FAIL
     //   - imageLogs[]:      url → HTTP-статус → байты → результат вставки в Excel
     // ============================================================
-    const SCRIPT_VERSION = '9.13';
+    const SCRIPT_VERSION = '9.15';
     const Diagnostics = {
         enabled: false,
         errors: [],
@@ -373,6 +385,160 @@
             try { return JSON.stringify(value); } catch (e) { return String(value); }
         }
     };
+
+    // ============================================================
+    // 1c. УТИЛИТЫ (escapeHtml, fetchWithTimeout, backoffDelay)
+    // ============================================================
+    // Экранирование HTML: защита от XSS при вставке произвольных строк
+    // (orderNumber, названия товаров, цены из JSON) в innerHTML.
+    function escapeHtml(str) {
+        if (str == null) return '';
+        return String(str)
+            .replace(/&/g, '&' + 'amp;')
+            .replace(/</g, '&' + 'lt;')
+            .replace(/>/g, '&' + 'gt;')
+            .replace(/"/g, '&' + 'quot;')
+            .replace(/'/g, '&' + '#39;')
+            .replace(/`/g, '&' + '#96;');
+    }
+
+    // fetch с реальным таймаутом:
+    //   - внутренний AbortController + setTimeout(abort(new DOMException('timeout','TimeoutError')), ms);
+    //   - внешний signal слушаем через addEventListener('abort') → controller.abort() (приходит AbortError);
+    //   - clearTimeout по завершении (в finally);
+    //   - чтение тела (text/arrayBuffer/json/blob) тоже под таймаутом (зависшее тело не отменяется самим abort fetch).
+    // Семантика: TimeoutError — НЕ тихий (retry в fetchOrderDetails), AbortError — внешняя отмена (тихий возврат).
+    async function fetchWithTimeout(url, options) {
+        const { ms = 30000, signal, ...rest } = options || {};
+        const controller = new AbortController();
+        let timer = null;
+        const onAbort = () => controller.abort();
+        if (signal) {
+            if (signal.aborted) controller.abort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+        const armTimer = () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+                controller.abort(new DOMException('timeout', 'TimeoutError'));
+            }, ms);
+        };
+        const clearTimer = () => {
+            if (timer) { clearTimeout(timer); timer = null; }
+        };
+        try {
+            armTimer();
+            const resp = await fetch(url, { ...rest, signal: controller.signal });
+            // Оборачиваем чтение тела тем же таймаутом.
+            const wrapBodyRead = (fn) => (...args) => {
+                armTimer();
+                return fn(...args).finally(clearTimer);
+            };
+            resp.text = wrapBodyRead(resp.text.bind(resp));
+            resp.arrayBuffer = wrapBodyRead(resp.arrayBuffer.bind(resp));
+            resp.json = wrapBodyRead(resp.json.bind(resp));
+            resp.blob = wrapBodyRead(resp.blob.bind(resp));
+            clearTimer();
+            return resp;
+        } catch(e) {
+            clearTimer();
+            throw e;
+        } finally {
+            if (signal) signal.removeEventListener('abort', onAbort);
+        }
+    }
+
+    // Экспоненциальная задержка между retry: 500/1000/2000/4000/5000 (cap) + джиттер ≤ 200 мс.
+    function backoffDelay(attempt) {
+        const base = Math.min(500 * Math.pow(2, attempt), 5000);
+        return base + Math.random() * 200;
+    }
+
+    // Чистое извлечение номера заказа из COMPOSER_ACTION-ссылки (base64 data-параметр).
+    // Возвращает номер вида "58957649-0583" (общий префикс postings[0]) или null.
+    // Устойчив к URL-кодированию (%3D, %2B) и символу «+» — легальному символу base64.
+    // Никогда не бросает исключение: при битом base64/JSON возвращает null.
+    function extractComposerAction(url) {
+        if (!url) return null;
+        const s = String(url);
+        const dm = s.match(/[?&]data=([A-Za-z0-9_\-=%+]+)/);
+        if (!dm) return null;
+        let b64 = dm[1];
+        try {
+            b64 = decodeURIComponent(b64).replace(/ /g, '+');
+        } catch(e) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(atob(b64));
+            const postings = parsed?.postings;
+            if (Array.isArray(postings) && postings.length > 0) {
+                const m2 = String(postings[0]).match(/^(\d+-\d+)/);
+                if (m2) return m2[1];
+            }
+        } catch(e) {
+            return null;
+        }
+        return null;
+    }
+
+    // Дедупликация заказов по orderNumber: первый заказ сохраняется, дубли удаляются.
+    // НЕ мутирует исходный массив — возвращает новый массив уникальных заказов.
+    function dedupeOrders(orders) {
+        const seen = new Set();
+        const result = [];
+        for (const o of orders || []) {
+            if (!seen.has(o.orderNumber)) {
+                seen.add(o.orderNumber);
+                result.push(o);
+            }
+        }
+        return result;
+    }
+
+    // Определение типа изображения (расширения для ExcelJS) по приоритету:
+    //   1. Магические байты данных (самый надёжный источник — фактические данные):
+    //      PNG 89 50 4E 47, JPEG FF D8 FF, GIF 47 49 46 38,
+    //      WebP 52 49 46 46 … 57 45 42 50 (RIFF…WEBP), BMP 42 4D;
+    //   2. Content-Type из заголовка ответа (resp.headers.get('content-type'));
+    //   3. URL (url.includes('.png') и т.п.) — ТОЛЬКО если заголовок отсутствует.
+    // Возвращает расширение: 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | 'jpeg' (по умолчанию).
+    function detectImageType(bytes, url, contentType) {
+        const b = bytes && bytes.length ? new Uint8Array(bytes) : null;
+        if (b && b.length >= 4) {
+            // PNG: 89 50 4E 47
+            if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'png';
+            // GIF: 47 49 46 38
+            if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'gif';
+            // BMP: 42 4D
+            if (b[0] === 0x42 && b[1] === 0x4D) return 'bmp';
+        }
+        if (b && b.length >= 3) {
+            // JPEG: FF D8 FF
+            if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'jpeg';
+        }
+        if (b && b.length >= 12) {
+            // WebP: RIFF(52 49 46 46) .... WEBP(57 45 42 50)
+            if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+                b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'webp';
+        }
+        // Content-Type из заголовка ответа
+        const ct = String(contentType || '').toLowerCase();
+        if (ct) {
+            if (ct.includes('png')) return 'png';
+            if (ct.includes('jpeg') || ct.includes('jpg')) return 'jpeg';
+            if (ct.includes('gif')) return 'gif';
+            if (ct.includes('webp')) return 'webp';
+            if (ct.includes('bmp')) return 'bmp';
+        }
+        // Fallback на URL — только если Content-Type отсутствует
+        const u = String(url || '').toLowerCase();
+        if (u.includes('.png')) return 'png';
+        if (u.includes('.webp')) return 'webp';
+        if (u.includes('.gif')) return 'gif';
+        if (u.includes('.bmp')) return 'bmp';
+        return 'jpeg';
+    }
 
     // ============================================================
     // 2. СТАТУСЫ
@@ -543,6 +709,18 @@
         return orderPay || '';
     }
 
+    // Защита от формульной инъекции: строка, начинающаяся с = + - @,
+    // при вставке в TSV/XLSX интерпретируется Excel как формула.
+    // Префикс-апостроф делает значение безопасным текстом (в Excel
+    // апостроф в начале ячейки не отображается). Числа не трогаем —
+    // они не начинаются с =+-@, пустые значения возвращаем как есть.
+    function safeCell(value) {
+        if (value == null) return '';
+        const s = String(value);
+        if (s === '') return '';
+        return /^[=+\-@]/.test(s) ? "'" + s : s;
+    }
+
     // ============================================================
     // 3. ПАРСИНГ РУССКОЙ ДАТЫ
     // ============================================================
@@ -554,38 +732,41 @@
     };
     const MONTHS_RU_NAMES = Object.keys(MONTHS_RU).join('|');
 
-    function currentYearForMonth(monthNum) {
-        // Если месяц сильно «из прошлого» относительно текущего (напр. декабрь при январе) —
-        // оставляем текущий год; Ozon не даёт год явно. Для июля 2026 ~ now ок.
-        return new Date().getFullYear();
+    // Год ДАТЫ ЗАКАЗА: «Получен 6 декабря» в январе → прошлый год.
+    // Заказ не может быть из будущего: месяц > текущего → год − 1.
+    function yearForOrderMonth(monthNum) {
+        const now = new Date();
+        const m = +monthNum; // monthNum приходит строкой '01'..'12' — приводим явно
+        let year = now.getFullYear();
+        if (m > now.getMonth() + 1) year -= 1;
+        return year;
+    }
+
+    // Год ДАТЫ ДОСТАВКИ (контекстный, Вариант C — согласовано 31.07.2026):
+    //   1. Прошедшие события («Получен …», «хранится до …») — месяц БУДУЩЕГО
+    //      относительно текущего → год − 1 (например «Получен 29 июля» в январе → 2025);
+    //   2. Ожидаемые события («Ожидаем …», «Ожидаемая дата …») — месяц ПРОШЛОГО
+    //      относительно текущего → год + 1 (например «Ожидаем 15 января» в декабре → 2027);
+    //   3. Иначе — текущий год.
+    function yearForDeliveryMonth(monthNum, statusText) {
+        const now = new Date();
+        const m = +monthNum;
+        const cur = now.getMonth() + 1;
+        let year = now.getFullYear();
+        const s = String(statusText || '').toLowerCase();
+        const isPast = /получен|хранится|получите|^до(?=\s)/i.test(s);
+        const isFuture = /ожидаем|ожидаемая|ожидается/i.test(s);
+        if (isPast && m > cur) year -= 1;
+        else if (isFuture && m < cur) year += 1;
+        return year;
     }
 
     function formatDateParts(day, monthName) {
         const month = MONTHS_RU[String(monthName).toLowerCase()] || '';
         if (!month) return '';
         const d = String(day).padStart(2, '0');
-        const year = currentYearForMonth(month);
+        const year = yearForOrderMonth(month);
         return `${d}.${month}.${year}`;
-    }
-
-    // dd.mm.yyyy -> проверка валидности; Date НЕ используем в Excel (timezone shift 15→14)
-    function isValidDdMmYyyy(str) {
-        if (!str) return false;
-        const m = String(str).trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-        if (!m) return false;
-        const day = parseInt(m[1], 10);
-        const month = parseInt(m[2], 10);
-        const year = parseInt(m[3], 10);
-        if (month < 1 || month > 12 || day < 1 || day > 31) return false;
-        const dt = new Date(year, month - 1, day);
-        return dt.getFullYear() === year && dt.getMonth() === month - 1 && dt.getDate() === day;
-    }
-
-    // Excel-safe: ВСЕГДА строка dd.mm.yyyy или диапазон «17–18.07.2026».
-    // new Date(y,m,d) + ExcelJS даёт сдвиг на −1 день в TZ UTC+3.
-    function toExcelDateValue(dateStr) {
-        if (!dateStr) return '';
-        return String(dateStr);
     }
 
     function parseRussianDate(text) {
@@ -620,6 +801,16 @@
         src = src.replace(/\s+/g, ' ').trim();
         if (!src) return '';
 
+        // Год доставки — контекстный (Вариант C): маркеры прошлого/будущего в statusText.
+        // statusText = ИСХОДНЫЙ текст (text), а не нормализованный src.
+        const fmt = (day, monthName) => {
+            const month = MONTHS_RU[String(monthName).toLowerCase()] || '';
+            if (!month) return '';
+            const d = String(day).padStart(2, '0');
+            const year = yearForDeliveryMonth(month, text);
+            return `${d}.${month}.${year}`;
+        };
+
         // Диапазон: "с 17 до 18 июля" / "17 - 18 июля" / "17–18 июля"
         let m = src.match(new RegExp(
             `(?:с\\s+)?(\\d{1,2})\\s*(?:[-–—]|до)\\s*(\\d{1,2})\\s+(${MONTHS_RU_NAMES})`,
@@ -627,7 +818,7 @@
         ));
         if (m) {
             const month = MONTHS_RU[m[3].toLowerCase()] || '01';
-            const year = currentYearForMonth(month);
+            const year = yearForDeliveryMonth(month, text);
             const d1 = String(m[1]).padStart(2, '0');
             const d2 = String(m[2]).padStart(2, '0');
             if (d1 === d2) return `${d1}.${month}.${year}`;
@@ -639,21 +830,21 @@
             `ожидаем\\s*(\\d{1,2})\\s+(${MONTHS_RU_NAMES})`,
             'i'
         ));
-        if (m) return formatDateParts(m[1], m[2]);
+        if (m) return fmt(m[1], m[2]);
 
         // "Ожидаемая дата: 15 июля"
         m = src.match(new RegExp(
             `ожидаемая\\s+дата[:\\s]+(\\d{1,2})\\s+(${MONTHS_RU_NAMES})`,
             'i'
         ));
-        if (m) return formatDateParts(m[1], m[2]);
+        if (m) return fmt(m[1], m[2]);
 
         // "до 27 июля включительно" / "до 27 июля"
         m = src.match(new RegExp(
             `до\\s+(\\d{1,2})\\s+(${MONTHS_RU_NAMES})`,
             'i'
         ));
-        if (m) return formatDateParts(m[1], m[2]);
+        if (m) return fmt(m[1], m[2]);
 
         // "15 июля" / "15 июля, среда" в контексте доставки
         if (/доставк|ожида|пункт|хран/i.test(src)) {
@@ -661,7 +852,7 @@
                 `(\\d{1,2})\\s+(${MONTHS_RU_NAMES})(?:\\s*,\\s*[а-яa-z]+)?`,
                 'i'
             ));
-            if (m) return formatDateParts(m[1], m[2]);
+            if (m) return fmt(m[1], m[2]);
         }
 
         // Диагностика: дата доставки не распознана — логируем сырой текст
@@ -1171,24 +1362,14 @@
                     // Путь 1: обычная редирект-ссылка с ?order=
                     const mm = s.match(/order=(\d+(?:-?\d+)?)/);
                     if (mm) { orderNumber = mm[1]; break; }
-                    // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление)
-                    const dm = s.match(/[?&]data=([A-Za-z0-9_\-=]+)/);
-                    if (dm) {
-                        try {
-                            const decoded = atob(dm[1]);
-                            const parsed = JSON.parse(decoded);
-                            const postings = parsed?.postings;
-                            if (Array.isArray(postings) && postings.length > 0) {
-                                // postings[0] = "58957649-0583-1" → общий номер = "58957649-0583"
-                                const first = String(postings[0]);
-                                // Отрезаем последний сегмент отправления (-1, -2, ...)
-                                const m2 = first.match(/^(\d+-\d+)/);
-                                if (m2) { orderNumber = m2[1]; break; }
-                            }
-                        } catch(e) {
-                            Diagnostics.logError('', `parseOrdersFromStateJSON.composerAction#${oi}`,
-                                s.slice(0, 300), e);
-                        }
+                    // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
+                    // Чистая логика вынесена в extractComposerAction (тестируется в F3).
+                    const composerNumber = extractComposerAction(s);
+                    if (composerNumber) { orderNumber = composerNumber; break; }
+                    if (/[?&]data=/.test(s)) {
+                        // Диагностика: data-параметр был, но номер не извлечён (битый base64/JSON)
+                        Diagnostics.logError('', `parseOrdersFromStateJSON.composerAction#${oi}`,
+                            s.slice(0, 300), new Error('extractComposerAction → null (битый base64/JSON)'));
                     }
                 }
 
@@ -1202,7 +1383,32 @@
                 const statusText = leftBlock?.textIcon?.text?.text
                     || leftBlock?.textIcon?.common?.text?.text || '';
                 const deliveryStatus = normalizeStatus(statusText);
-                const date = parseRussianDate(statusText);
+                // Дата заказа (B2b, PRIMARY fallback): парсим только из statusText
+                // («Получен 6 июля»). Для «В пути»/«Отменён»/«Собирается» statusText
+                // даты не содержит — подключаем fallback из текстовых полей leftBlock.
+                let date = parseRussianDate(statusText);
+                if (!date) {
+                    // Fallback из JSON orderlist (B2b): парсим parseRussianDate по текстовым
+                    // полям leftBlock КРОМЕ subtitle (subtitle занят датой доставки).
+                    const leftDateCandidates = [
+                        leftBlock?.title?.common?.text || leftBlock?.title?.text || '',
+                        leftBlock?.common?.text || '',
+                        leftBlock?.textIcon?.common?.text?.text || leftBlock?.textIcon?.text?.text || '',
+                    ].filter(Boolean);
+                    for (const cand of leftDateCandidates) {
+                        date = parseRussianDate(cand);
+                        if (date) {
+                            // Диагностика: дата заказа восстановлена из leftBlock (не из statusText)
+                            Diagnostics.logParseResult(orderNumber, 'JSON.date', 'fallback: leftBlock (title/common/textIcon) → parseRussianDate', date);
+                            break;
+                        }
+                    }
+                }
+                if (!date) {
+                    // Диагностика: дата заказа не найдена ни в statusText, ни в leftBlock —
+                    // фиксируем в Diagnostics (B2b: для каждого заказа дата ИЛИ лог).
+                    Diagnostics.logParseResult(orderNumber, 'JSON.date', 'parseRussianDate(statusText + leftBlock) → empty', 'дата заказа не определена (statusText: ' + statusText + ')');
+                }
 
                 // --- АДРЕС ПВЗ ---
                 const titleText = leftBlock?.title?.text || '';
@@ -1463,10 +1669,11 @@
     // ============================================================
     // Внутренняя функция: одна попытка загрузки orderdetails.
     // При сетевой/HTTP-ошибке выбрасывает исключение (ловится обёрткой fetchOrderDetails).
+    // Таймаут попытки — 5 с (реальный, через fetchWithTimeout: и заголовки, и чтение тела).
     async function fetchOrderDetailsOnce(orderNumber, signal) {
         try {
             const url = `/my/orderdetails/?order=${orderNumber}`;
-            const resp = await fetch(url, { signal, credentials: 'include' });
+            const resp = await fetchWithTimeout(url, { ms: 5000, signal, credentials: 'include' });
             if (!resp.ok) {
                 // HTTP-ошибка → выбрасываем для retry в обёртке
                 throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
@@ -1809,7 +2016,42 @@
                 // Если товаров несколько и плашки разные — не угадываем order-level paid
             }
 
-            return { items: allItems, address: detailsAddress };
+            // B2b (SECONDARY): дата оформления заказа со страницы orderdetails.
+            // Реальный селектор — диагностический: snapshot HTML + logParseResult.
+            // Финальный селектор может уточняться после реального прогона (F8).
+            let orderDate = '';
+            try {
+                const dateCandidates = [];
+                doc.querySelectorAll('.tsBody400Small, .tsBody500Medium, .tsCompactControl400Small, [class*="tsBody"], [class*="tsHeadline"]').forEach(el => {
+                    const t = (el.textContent || '').trim();
+                    if (!t || t.length > 120) return;
+                    // «Заказ от 6 июля», «Оформлен 6 июля», «от 6 июля» — типовые подписи даты заказа
+                    if (/от\s+\d{1,2}\s+[а-яё]+|оформлен|заказ\s+(от|№)/i.test(t)) {
+                        dateCandidates.push(t);
+                    }
+                });
+                if (dateCandidates.length === 0 && doc.body) {
+                    dateCandidates.push((doc.body.textContent || '').replace(/\s+/g, ' '));
+                }
+                for (const cand of dateCandidates) {
+                    // Точный паттерн «от ДД месяца» (дата заказа, не доставки)
+                    const m = cand.match(new RegExp(`от\\s+(\\d{1,2})\\s+(${MONTHS_RU_NAMES})`, 'i'));
+                    if (m) { orderDate = formatDateParts(m[1], m[2]); break; }
+                    orderDate = parseRussianDate(cand);
+                    if (orderDate) break;
+                }
+                if (orderDate) {
+                    Diagnostics.logParseResult(orderNumber, 'JSON.orderDate',
+                        'fallback: orderdetails (от ДД месяца → formatDateParts / parseRussianDate)', orderDate);
+                } else {
+                    Diagnostics.logParseResult(orderNumber, 'JSON.orderDate',
+                        'orderdetails: дата оформления не распознана (snapshot HTML сохранён)', '');
+                }
+            } catch(e) {
+                Diagnostics.logError(orderNumber, 'fetchOrderDetails.orderDate', '', e);
+            }
+
+            return { items: allItems, address: detailsAddress, orderDate };
         } catch(e) {
             // AbortError не повторяем — отмена по сигналу вышестоящего кода
             if (e.name === 'AbortError') return { items: [], address: '' };
@@ -1821,6 +2063,10 @@
     // ============================================================
     // 7b. ОБОЁРТКА С RETRY: до 3 попыток с экспоненциальной задержкой.
     // Защищает от «Failed to fetch» и временных HTTP-ошибок (429/502/503).
+    // Таймаут попытки 5 с + backoff 0,5/1/2 с → общий лимит ~16–21 с на заказ.
+    // НЕ бросает исключение: при исчерпании попыток возвращает { items, address, error }.
+    //   - TimeoutError (внутренний таймаут) → НЕ тихий возврат: retry, потом error-поле.
+    //   - AbortError (внешняя отмена) → тихий возврат { items: [], address: '' } как раньше.
     // ============================================================
     async function fetchOrderDetails(orderNumber, signal) {
         const MAX_RETRIES = 3;
@@ -1829,19 +2075,25 @@
                 return await fetchOrderDetailsOnce(orderNumber, signal);
             } catch(e) {
                 if (e.name === 'AbortError') return { items: [], address: '' };
+                if (e.name === 'TimeoutError') {
+                    console.warn(`[Ozon Copier] fetch timeout for ${orderNumber}, attempt ${attempt + 1}/${MAX_RETRIES}`);
+                }
                 if (attempt < MAX_RETRIES - 1) {
-                    const delay = 500 * (attempt + 1);
-                    console.warn(`[Ozon Copier] fetch attempt ${attempt + 1}/${MAX_RETRIES} failed for ${orderNumber}, retry in ${delay}ms:`, e.message || e);
+                    const delay = backoffDelay(attempt);
+                    console.warn(`[Ozon Copier] fetch attempt ${attempt + 1}/${MAX_RETRIES} failed for ${orderNumber}, retry in ${Math.round(delay)}ms:`, e.message || e);
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                 }
-                // Все попытки исчерпаны
+                // Все попытки исчерпаны — формируем текст ошибки для пользователя
+                const errText = (e.name === 'TimeoutError')
+                    ? 'таймаут загрузки деталей заказа'
+                    : ('HTTP ' + (e.message || 'ошибка загрузки деталей заказа'));
                 console.warn(`[Ozon Copier] fetch error for ${orderNumber} after ${MAX_RETRIES} attempts:`, e);
                 Diagnostics.logError(orderNumber, 'fetchOrderDetails (outer catch)', '', e);
-                return { items: [], address: '' };
+                return { items: [], address: '', error: errText };
             }
         }
-        return { items: [], address: '' };
+        return { items: [], address: '', error: 'таймаут загрузки деталей заказа' };
     }
 
     async function enrichOrdersWithProducts(orders, onProgress) {
@@ -1857,9 +2109,17 @@
                 const order = orders[i + idx];
                 const data = result || { items: [], address: '' };
                 const list = data.items || [];
+                // Ошибка загрузки деталей (таймаут/HTTP после retry) — пробрасываем заказу,
+                // чтобы copyOrders/showPreview/downloadXLSX показали причину вместо статичного текста.
+                if (data.error) order.error = data.error;
                 // Запасной адрес пункта выдачи со страницы orderdetails
                 if (!order.pickupPoint && data.address) {
                     order.pickupPoint = data.address;
+                }
+                // B2b (SECONDARY): дата заказа из orderdetails, если primary-fallback не дал.
+                // Если и тут пусто — дата уже зафиксирована в Diagnostics (parseOrdersFromStateJSON).
+                if (!order.date && data.orderDate) {
+                    order.date = data.orderDate;
                 }
                 // Fallback: дата доставки с orderlist-карточки (особенно «В пути»).
                 // Оплата: item-level из JSON orderlist → item из orderdetails → order-level fallback.
@@ -1906,8 +2166,9 @@
         const sep = '\t';
 
         const headers = [
+            'Дата заказа',
             '№ Заказа',
-            'Статус',
+            'Статус доставки',
             'Товары',
             'Кол-во',
             'Сумма',
@@ -1930,7 +2191,7 @@
             const displayItems = hasItems
                 ? o.items
                 : [{
-                    name: '(не удалось загрузить детали заказа)',
+                    name: o.error || '(не удалось загрузить детали заказа)',
                     price: o.fallbackAmount || '',
                     qty: '1',
                     shipmentStatus: o.deliveryStatus || '',
@@ -1951,7 +2212,9 @@
             if (!isNaN(orderTotal) && !isCancelled) grandTotal += orderTotal;
 
             displayItems.forEach((item, idx) => {
-                const name = item.name || '';
+                // Очистка: табы/переносы в названии товара «разъезжают» строку
+                // TSV по колонкам при вставке в Excel — заменяем их на пробел.
+                const name = String(item.name || '').replace(/[\t\r\n]+/g, ' ');
                 // Статус: на первой строке — order-level (если shipment пуст),
                 // далее — статус конкретной отправки
                 const displayStatus = (idx === 0)
@@ -1971,29 +2234,33 @@
                     ? 'ожидает вручения до ' + deliveryDateRaw
                     : deliveryDateRaw;
 
+                // safeCell защищает строковые ячейки от формульной инъекции
+                // (= + - @ в начале). Числовые qty/price и пустые — без изменений.
                 if (idx === 0) {
                     tsv += [
-                        o.orderNumber, // A: № Заказа
-                        displayStatus, // B: Статус доставки
-                        name, // C: Товары
-                        qty, // D: Кол-во
-                        price, // E: Сумма
-                        pay, // F: Статус оплаты (item-level)
-                        o.pickupPoint, // G: Пункт выдачи
-                        deliveryDate, // H: Дата доставки (по shipment)
-                        picture // I: Фото
+                        safeCell(o.date), // A: Дата заказа
+                        safeCell(o.orderNumber), // B: № Заказа
+                        safeCell(displayStatus), // C: Статус доставки
+                        safeCell(name), // D: Товары
+                        qty, // E: Кол-во
+                        price, // F: Сумма
+                        safeCell(pay), // G: Статус оплаты (item-level)
+                        safeCell(o.pickupPoint), // H: Пункт выдачи
+                        safeCell(deliveryDate), // I: Дата доставки (по shipment)
+                        safeCell(picture) // J: Фото
                     ].join(sep) + '\n';
                 } else {
                     tsv += [
                         '',
-                        displayStatus,
-                        name,
+                        '',
+                        safeCell(displayStatus),
+                        safeCell(name),
                         qty,
                         price,
-                        pay,
-                        o.pickupPoint,
-                        deliveryDate,
-                        picture
+                        safeCell(pay),
+                        safeCell(o.pickupPoint),
+                        safeCell(deliveryDate),
+                        safeCell(picture)
                     ].join(sep) + '\n';
                 }
                 totalRows++;
@@ -2003,10 +2270,10 @@
         // Итоги
         if (orders.length > 0) {
             tsv += '\n';
-            tsv += ['', '', '', '', '', '', '', '', ''].join(sep) + '\n';
+            tsv += ['', '', '', '', '', '', '', '', '', ''].join(sep) + '\n';
             const grandTotalStr = isNaN(grandTotal) ? '' :
                 (grandTotal % 1 === 0 ? grandTotal.toString() : grandTotal.toFixed(2).replace('.', ','));
-            tsv += ['ИТОГО:', orders.length + ' заказов, ' + totalRows + ' позиций', '', '', grandTotalStr, '', '', '', ''].join(sep) + '\n';
+            tsv += ['ИТОГО:', orders.length + ' заказов, ' + totalRows + ' позиций', '', '', '', grandTotalStr, '', '', '', ''].join(sep) + '\n';
         }
 
         return tsv;
@@ -2045,19 +2312,25 @@
             const firstItem = hasItems ? o.items[0] : null;
             const hasPic = firstItem && firstItem.picture ? ' 📸' : '';
             if (firstItem && firstItem.picture) withPics++;
+            // Обрезка по code points (не режет суррогатные пары эмодзи).
+            // Если детали не загрузились (error) — показываем текст ошибки вместо статичного плейсхолдера.
             const previewName = firstItem
-                ? firstItem.name.substring(0, 50) + (firstItem.name.length > 50 ? '…' : '')
-                : '';
+                ? (() => {
+                    const chars = Array.from(String(firstItem.name || ''));
+                    return chars.slice(0, 50).join('') + (chars.length > 50 ? '…' : '');
+                })()
+                : (o.error || '(не удалось загрузить детали заказа)');
             const moreCount = hasItems ? o.items.length - 1 : 0;
 
+            // ВСЕ подставляемые значения экранируем (XSS: <img onerror=...> в orderNumber/названии/цене)
             html += `<tr>
                 <td>
-                    <small><b>${o.orderNumber}</b></small>
-                    ${previewName ? `<span class="product-name">${previewName}</span>` : ''}
-                    ${moreCount > 0 ? `<span style="color:#999;font-size:11px;">+${moreCount} товаров</span>` : ''}
+                    <small><b>${escapeHtml(o.orderNumber)}</b></small>
+                    ${previewName ? `<span class="product-name">${escapeHtml(previewName)}</span>` : ''}
+                    ${moreCount > 0 ? `<span style="color:#999;font-size:11px;">+${escapeHtml(moreCount)} товаров</span>` : ''}
                 </td>
                 <td>
-                    ${hasItems ? o.items.map(i => i.price).join('+') : ''}
+                    ${hasItems ? o.items.map(i => escapeHtml(i.price)).join('+') : ''}
                 </td>
                 <td>${hasPic ? '📸' : ''}</td>
             </tr>`;
@@ -2196,22 +2469,12 @@
 
             // Шаг 1.5: Дедупликация — Ozon может показывать один заказ в нескольких карточках
             // (разные отправления). Оставляем только первое вхождение каждого orderNumber.
-            const seenNumbers = new Set();
-            const deduped = [];
-            for (const o of orders) {
-                if (!seenNumbers.has(o.orderNumber)) {
-                    seenNumbers.add(o.orderNumber);
-                    deduped.push(o);
-                }
-            }
+            const deduped = dedupeOrders(orders);
             if (deduped.length < orders.length) {
-                const removed = orders.length - deduped.length;
-                console.log(`[Ozon Copier] Удалено дублей: ${removed}`);
+                console.log(`[Ozon Copier] Удалено дублей: ${orders.length - deduped.length}`);
             }
-            orders.length = 0;
-            orders.push(...deduped);
 
-            if (orders.length === 0) {
+            if (deduped.length === 0) {
                 btn.classList.remove('ozon-copy-btn--loading');
                 btn.classList.add('ozon-copy-btn--error');
                 btn.innerHTML = '❌ Не найдено';
@@ -2224,29 +2487,33 @@
             }
 
             // Шаг 2: Подгружаем товары с ценами
-            btn.innerHTML = `⏳ Загружаю товары (0/${orders.length})...`;
+            btn.innerHTML = `⏳ Загружаю товары (0/${deduped.length})...`;
 
-            await enrichOrdersWithProducts(orders, (current, total) => {
+            await enrichOrdersWithProducts(deduped, (current, total) => {
                 btn.innerHTML = `⏳ Загружаю товары (${current}/${total})...`;
                 showProgress(current, total);
             });
 
             // Шаг 3: Итоговый предпросмотр
-            showPreview(orders);
+            showPreview(deduped);
+
+            // Предупреждение о заказах, детали которых не удалось загрузить (таймаут/HTTP)
+            const failedCount = deduped.filter(o => o.error).length;
+            if (failedCount > 0) {
+                showToast(`⚠️ ${failedCount} ${failedCount === 1 ? 'заказ' : 'заказов'} не удалось загрузить (таймаут/сеть)`, 'error');
+            }
 
             // Шаг 4: Форматируем и копируем
-            const tsv = formatTSV(orders);
+            const tsv = formatTSV(deduped);
             const ok = copyToClipboard(tsv);
 
             if (ok) {
                 btn.classList.remove('ozon-copy-btn--loading');
                 btn.classList.add('ozon-copy-btn--success');
-                const totalItems = orders.reduce((s, o) => s + ((o.items && o.items.length) || 0), 0);
-                btn.innerHTML = `✅ ${orders.length} заказов, ${totalItems} товаров`;
+                const totalItems = deduped.reduce((s, o) => s + ((o.items && o.items.length) || 0), 0);
+                btn.innerHTML = `✅ ${deduped.length} заказов, ${totalItems} товаров`;
 
-                let msg = `✅ Скопировано: ${orders.length} заказов, ${totalItems} товаров\n📋 Вставьте: Ctrl+V`;
-
-                showToast(msg, 'success');
+                showToast(`✅ Скопировано: ${deduped.length} заказов, ${totalItems} товаров\n📋 Вставьте: Ctrl+V`, 'success');
 
                 setTimeout(() => {
                     btn.classList.remove('ozon-copy-btn--success');
@@ -2269,6 +2536,224 @@
     }
 
     // ============================================================
+    // 12a. ПОСТРОЕНИЕ XLSX-КНИГИ (вынесено для юнит-тестов F4)
+    // Создаёт и возвращает workbook через глобальный ExcelJS.
+    // 10 колонок по словарю B1: «Дата заказа» первой (A), остальные сдвинуты на +1.
+    // Логика идентична в userscript и extension (проверяется sync-check F6).
+    // ============================================================
+    function buildXlsxWorkbook(deduped, imageCache) {
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'Ozon Copier';
+        const ws = workbook.addWorksheet('Заказы');
+
+        const HEADER_FILL = '1F4E79';
+        const HEADER_FONT_COLOR = 'FFFFFF';
+
+        // Заголовки (10 колонок, единый словарь B1: в TSV и XLSX — «Статус доставки»)
+        const headers = ['Дата заказа', '№ Заказа', 'Статус доставки', 'Товары', 'Кол-во', 'Сумма', 'Статус оплаты', 'Пункт выдачи', 'Дата доставки', 'Фото'];
+        headers.forEach((h, i) => {
+            const cell = ws.getCell(1, i + 1);
+            cell.value = h;
+            cell.font = { bold: true, color: { argb: HEADER_FONT_COLOR }, size: 12 };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+            cell.border = {
+                top: { style: 'thin' }, bottom: { style: 'thin' },
+                left: { style: 'thin' }, right: { style: 'thin' }
+            };
+        });
+
+        // Ширина колонок (A: 14 — дата заказа)
+        ws.columns = [
+            { width: 14 }, // A: Дата заказа
+            { width: 20 }, // B: № Заказа
+            { width: 24 }, // C: Статус доставки
+            { width: 55 }, // D: Товары
+            { width: 22 }, // E: Кол-во
+            { width: 13 }, // F: Сумма
+            { width: 22 }, // G: Статус оплаты
+            { width: 28 }, // H: Пункт выдачи
+            { width: 18 }, // I: Дата доставки (диапазоны 17–18.07.2026)
+            { width: 18 }  // J: Фото
+        ];
+
+        // Фиксация шапки
+        ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+        // Данные
+        let row = 2;
+        const IMG_HEIGHT = 60; // px — высота картинки в ячейке
+
+        deduped.forEach(o => {
+            const hasItems = o.items && o.items.length > 0;
+            const displayItems = hasItems
+                ? o.items
+                : [{
+                    name: o.error || '(не удалось загрузить детали заказа)',
+                    price: '',
+                    qty: '1',
+                    shipmentStatus: '',
+                    deliveryDate: o.cardDeliveryDate || '',
+                    paymentStatus: o.paymentStatus || '',
+                    picture: ''
+                }];
+            // Весь заказ отменён? (для очистки колонок «Кол-во»/«Сумма»/«Статус оплаты»)
+            const isCancelled = o.deliveryStatus === '❌ Отменён';
+
+            displayItems.forEach((item, idx) => {
+                // Очистка: табы/переносы в названии товара (консистентно с TSV).
+                const name = String(item.name || '').replace(/[\t\r\n]+/g, ' ');
+                const displayStatus = (idx === 0)
+                    ? (item.shipmentStatus || o.deliveryStatus || '')
+                    : (item.shipmentStatus || '');
+                // Проблема 2: для отменённых строк (весь заказ ИЛИ конкретный shipment)
+                // очищаем «Кол-во», «Сумма» и «Статус оплаты».
+                const rowCancelled = isCancelled || displayStatus.includes('❌ Отменён');
+                const price = (hasItems && !rowCancelled) ? (() => {
+                    const v = String(item.price || '').replace(',', '.');
+                    const n = parseFloat(v);
+                    return isNaN(n) ? (item.price || '') : n;
+                })() : '';
+                const qtyNum = rowCancelled ? '' : (() => {
+                    const n = parseInt(item.qty, 10);
+                    return !isNaN(n) && n > 0 ? n : 1;
+                })();
+                const picture = item.picture || '';
+                const deliveryDateRaw = item.deliveryDate || o.cardDeliveryDate || '';
+                const pay = rowCancelled ? '' : mergePaymentStatus(item.paymentStatus, o.paymentStatus);
+                // Префикс для «Готов к выдаче»
+                const deliveryDateDisplay = (displayStatus.includes('Готов к выдаче') && deliveryDateRaw)
+                    ? 'ожидает вручения до ' + deliveryDateRaw
+                    : deliveryDateRaw;
+
+                // safeCell защищает строковые ячейки от формульной инъекции
+                // (= + - @ в начале). Числовые qtyNum/price остаются числами.
+                if (idx === 0) {
+                    ws.getCell(row, 1).value = safeCell(o.date); // A: Дата заказа
+                    ws.getCell(row, 2).value = safeCell(o.orderNumber); // B: № Заказа
+                }
+
+                ws.getCell(row, 3).value = safeCell(displayStatus); // C: Статус доставки
+                ws.getCell(row, 4).value = safeCell(name); // D: Товары
+                ws.getCell(row, 5).value = qtyNum; // E: Кол-во (число)
+                ws.getCell(row, 6).value = price; // F: Сумма (число)
+                ws.getCell(row, 6).numFmt = '#,##0.00';
+                ws.getCell(row, 7).value = safeCell(pay); // G: Статус оплаты
+                ws.getCell(row, 8).value = safeCell(o.pickupPoint); // H: Пункт выдачи
+
+                // I: Дата / диапазон доставки — всегда текст (без timezone-сдвига)
+                ws.getCell(row, 9).value = safeCell(String(deliveryDateDisplay));
+
+                // Вставляем картинку в колонку J (col=9, 0-based)
+                if (picture && imageCache.has(picture)) {
+                    const cached = imageCache.get(picture);
+                    try {
+                        const imageId = workbook.addImage({
+                            buffer: cached.buffer,
+                            extension: cached.extension
+                        });
+                        ws.addImage(imageId, {
+                            tl: { col: 9, row: row - 1 },
+                            ext: { width: IMG_HEIGHT, height: IMG_HEIGHT },
+                            editAs: 'oneCell'
+                        });
+                        ws.getRow(row).height = IMG_HEIGHT * 0.75;
+                    } catch(e) {
+                        console.warn('[Ozon Copier] Ошибка вставки картинки:', e);
+                        // Диагностика: не удалось вставить картинку в Excel
+                        Diagnostics.logImage(picture, '', 0, 'EXCEL_INSERT_ERROR', e);
+                        ws.getCell(row, 10).value = picture;
+                    }
+                } else if (picture && !imageCache.has(picture)) {
+                    ws.getCell(row, 10).value = picture;
+                }
+
+                // Стили для строки (10 колонок)
+                const isEvenRow = (row % 2 === 0);
+                const rowFill = isEvenRow
+                    ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F2F7FB' } }
+                    : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF' } };
+                for (let c = 1; c <= 10; c++) {
+                    const cell = ws.getCell(row, c);
+                    cell.fill = rowFill;
+                    cell.border = {
+                        top: { style: 'thin' }, bottom: { style: 'thin' },
+                        left: { style: 'thin' }, right: { style: 'thin' }
+                    };
+                    cell.alignment = { vertical: 'middle', wrapText: true };
+                    if (c === 5 || c === 6 || c === 9) {
+                        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+                    }
+                }
+
+                row++;
+            });
+        });
+
+        // Автофильтр
+        ws.autoFilter = { from: 'A1', to: `J${row - 1}` };
+
+        // Условное форматирование по статусам доставки (колонка C — 8 статусов)
+        const lastDataRow = row - 1;
+        if (lastDataRow >= 2) {
+            ws.addConditionalFormatting({
+                ref: `C2:C${lastDataRow}`,
+                rules: [
+                    //  Зелёные: Доставлен, Готов к выдаче
+                    { type: 'containsText', operator: 'containsText', text: 'Доставлен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Готов к выдаче', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                    //  Жёлтые: Передаётся, Передан, В пути
+                    { type: 'containsText', operator: 'containsText', text: 'Передаётся', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Передан', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'В пути', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                    //  Красно-розовый: Отменён
+                    { type: 'containsText', operator: 'containsText', text: 'Отменён', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
+                    //  Серо-голубой: Собирается, Обрабатывается
+                    { type: 'containsText', operator: 'containsText', text: 'Собирается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
+                    { type: 'containsText', operator: 'containsText', text: 'Обрабатывается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
+                ]
+            });
+        }
+
+        // Условное форматирование по статусам оплаты (колонка G)
+        ws.addConditionalFormatting({
+            ref: `G2:G${lastDataRow}`,
+            rules: [
+                { type: 'containsText', operator: 'containsText', text: 'Оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
+                { type: 'containsText', operator: 'containsText', text: 'Не оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
+                { type: 'containsText', operator: 'containsText', text: 'При получении', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                { type: 'containsText', operator: 'containsText', text: 'Ожидает оплаты', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                { type: 'containsText', operator: 'containsText', text: 'Частично', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
+                { type: 'containsText', operator: 'containsText', text: 'Возврат', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'E4DFEC' } }, font: { color: { argb: '4F2F6C' } } } },
+            ]
+        });
+
+        // Итоговая строка с формулой SUMIF (не учитывает отменённые)
+        const summaryRow = row;
+        const summaryFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D6E4F0' } };
+        ws.mergeCells(summaryRow, 5, summaryRow, 6);
+        ws.getCell(summaryRow, 5).value = 'ИТОГО (без отмен):';
+        ws.getCell(summaryRow, 5).font = { bold: true, size: 12 };
+        ws.getCell(summaryRow, 5).alignment = { horizontal: 'right', vertical: 'middle' };
+        ws.getCell(summaryRow, 5).fill = summaryFill;
+        ws.getCell(summaryRow, 6).fill = summaryFill;
+        ws.getCell(summaryRow, 7).value = {
+            formula: `SUMIF(C2:C${lastDataRow},"<>❌ Отменён",F2:F${lastDataRow})`
+        };
+        ws.getCell(summaryRow, 7).font = { bold: true, size: 12 };
+        ws.getCell(summaryRow, 7).numFmt = '#,##0.00';
+        ws.getCell(summaryRow, 7).fill = summaryFill;
+        for (let c = 1; c <= 10; c++) {
+            ws.getCell(summaryRow, c).border = {
+                top: { style: 'double' }, bottom: { style: 'thin' },
+                left: { style: 'thin' }, right: { style: 'thin' }
+            };
+        }
+
+        return workbook;
+    }
+
+    // ============================================================
     // 12. СКАЧИВАНИЕ XLSX С РЕАЛЬНЫМИ ФОТО
     // ============================================================
     async function downloadXLSX() {
@@ -2284,14 +2769,7 @@
             const orders = parseOrders();
 
             // Дедупликация
-            const seenNumbers = new Set();
-            const deduped = [];
-            for (const o of orders) {
-                if (!seenNumbers.has(o.orderNumber)) {
-                    seenNumbers.add(o.orderNumber);
-                    deduped.push(o);
-                }
-            }
+            const deduped = dedupeOrders(orders);
             if (deduped.length < orders.length) {
                 console.log(`[Ozon Copier] Удалено дублей: ${orders.length - deduped.length}`);
             }
@@ -2333,7 +2811,8 @@
             const fetchImage = async (url) => {
                 if (imageCache.has(url)) return;
                 try {
-                    const resp = await fetch(url);
+                    // Фото: 30 с на запрос, БЕЗ retry (тяжёлые файлы, retry не поможет).
+                    const resp = await fetchWithTimeout(url, { ms: 30000 });
                     if (!resp.ok) {
                         // Диагностика: HTTP-ошибка при загрузке фото
                         Diagnostics.logImage(url, resp.status, 0, 'HTTP_ERROR',
@@ -2341,11 +2820,8 @@
                         return;
                     }
                     const buffer = await resp.arrayBuffer();
-                    // Определяем расширение
-                    let ext = 'jpeg';
-                    if (url.includes('.png')) ext = 'png';
-                    else if (url.includes('.webp')) ext = 'webp';
-                    else if (url.includes('.gif')) ext = 'gif';
+                    // Определяем расширение по Content-Type/магическим байтам (fallback на URL)
+                    const ext = detectImageType(buffer, url, resp.headers.get('content-type'));
                     imageCache.set(url, { buffer, extension: ext });
                     // Диагностика: фото успешно скачано и закэшировано
                     Diagnostics.logImage(url, resp.status, buffer.byteLength, 'CACHED', '');
@@ -2365,210 +2841,20 @@
                 await Promise.all(batch.map(fetchImage));
             }
 
-            // Шаг 4: Собираем XLSX через ExcelJS
+            // Шаг 4: Собираем XLSX через ExcelJS (построение книги вынесено в buildXlsxWorkbook)
             btn.innerHTML = '📊 Собираю файл...';
-            const workbook = new ExcelJS.Workbook();
-            workbook.creator = 'Ozon Copier';
-            const ws = workbook.addWorksheet('Заказы');
 
-            const HEADER_FILL = '1F4E79';
-            const HEADER_FONT_COLOR = 'FFFFFF';
-
-            // Заголовки
-            const headers = ['№ Заказа', 'Статус', 'Товары', 'Кол-во', 'Сумма', 'Статус оплаты', 'Пункт выдачи', 'Дата доставки', 'Фото'];
-            headers.forEach((h, i) => {
-                const cell = ws.getCell(1, i + 1);
-                cell.value = h;
-                cell.font = { bold: true, color: { argb: HEADER_FONT_COLOR }, size: 12 };
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-                cell.border = {
-                    top: { style: 'thin' }, bottom: { style: 'thin' },
-                    left: { style: 'thin' }, right: { style: 'thin' }
-                };
-            });
-
-            // Ширина колонок
-            ws.columns = [
-                { width: 20 }, // A: № Заказа
-                { width: 24 }, // B: Статус доставки
-                { width: 55 }, // C: Товары
-                { width: 22 }, // D: Кол-во
-                { width: 13 }, // E: Сумма
-                { width: 22 }, // F: Статус оплаты
-                { width: 28 }, // G: Пункт выдачи
-                { width: 18 }, // H: Дата доставки (диапазоны 17–18.07.2026)
-                { width: 18 } // I: Фото
-            ];
-
-            // Фиксация шапки
-            ws.views = [{ state: 'frozen', ySplit: 1 }];
-
-            // Данные
-            let row = 2;
-            const IMG_HEIGHT = 60; // px — высота картинки в ячейке
-
-            deduped.forEach(o => {
-                const hasItems = o.items && o.items.length > 0;
-                const displayItems = hasItems
-                    ? o.items
-                    : [{
-                        name: '',
-                        price: '',
-                        qty: '1',
-                        shipmentStatus: '',
-                        deliveryDate: o.cardDeliveryDate || '',
-                        paymentStatus: o.paymentStatus || '',
-                        picture: ''
-                    }];
-                // Весь заказ отменён? (для очистки колонок «Кол-во»/«Сумма»/«Статус оплаты»)
-                const isCancelled = o.deliveryStatus === '❌ Отменён';
-
-                displayItems.forEach((item, idx) => {
-                    const name = item.name || '';
-                    const displayStatus = (idx === 0)
-                        ? (item.shipmentStatus || o.deliveryStatus || '')
-                        : (item.shipmentStatus || '');
-                    // Проблема 2: для отменённых строк (весь заказ ИЛИ конкретный shipment)
-                    // очищаем «Кол-во», «Сумма» и «Статус оплаты».
-                    const rowCancelled = isCancelled || displayStatus.includes('❌ Отменён');
-                    const price = (hasItems && !rowCancelled) ? (() => {
-                        const v = String(item.price || '').replace(',', '.');
-                        const n = parseFloat(v);
-                        return isNaN(n) ? (item.price || '') : n;
-                    })() : '';
-                    const qtyNum = rowCancelled ? '' : (() => {
-                        const n = parseInt(item.qty, 10);
-                        return !isNaN(n) && n > 0 ? n : 1;
-                    })();
-                    const picture = item.picture || '';
-                    const deliveryDateRaw = item.deliveryDate || o.cardDeliveryDate || '';
-                    const pay = rowCancelled ? '' : mergePaymentStatus(item.paymentStatus, o.paymentStatus);
-                    // Префикс для «Готов к выдаче»
-                    const deliveryDateDisplay = (displayStatus.includes('Готов к выдаче') && deliveryDateRaw)
-                        ? 'ожидает вручения до ' + deliveryDateRaw
-                        : deliveryDateRaw;
-
-                    if (idx === 0) {
-                        ws.getCell(row, 1).value = o.orderNumber;
-                    }
-
-                    ws.getCell(row, 2).value = displayStatus;
-                    ws.getCell(row, 3).value = name;
-                    ws.getCell(row, 4).value = qtyNum;
-                    ws.getCell(row, 5).value = price;
-                    ws.getCell(row, 5).numFmt = '#,##0.00';
-                    ws.getCell(row, 6).value = pay;
-                    ws.getCell(row, 7).value = o.pickupPoint;
-
-                    // H: Дата / диапазон доставки — всегда текст (без timezone-сдвига)
-                    ws.getCell(row, 8).value = toExcelDateValue(deliveryDateDisplay);
-
-                    // Вставляем картинку в колонку I (col=8, 0-based)
-                    if (picture && imageCache.has(picture)) {
-                        const cached = imageCache.get(picture);
-                        try {
-                            const imageId = workbook.addImage({
-                                buffer: cached.buffer,
-                                extension: cached.extension
-                            });
-                            ws.addImage(imageId, {
-                                tl: { col: 8, row: row - 1 },
-                                ext: { width: IMG_HEIGHT, height: IMG_HEIGHT },
-                                editAs: 'oneCell'
-                            });
-                            ws.getRow(row).height = IMG_HEIGHT * 0.75;
-                        } catch(e) {
-                            console.warn('[Ozon Copier] Ошибка вставки картинки:', e);
-                            // Диагностика: не удалось вставить картинку в Excel
-                            Diagnostics.logImage(picture, '', 0, 'EXCEL_INSERT_ERROR', e);
-                            ws.getCell(row, 9).value = picture;
-                        }
-                    } else if (picture && !imageCache.has(picture)) {
-                        ws.getCell(row, 9).value = picture;
-                    }
-
-                    // Стили для строки (9 колонок)
-                    const isEvenRow = (row % 2 === 0);
-                    const rowFill = isEvenRow
-                        ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F2F7FB' } }
-                        : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF' } };
-                    for (let c = 1; c <= 9; c++) {
-                        const cell = ws.getCell(row, c);
-                        cell.fill = rowFill;
-                        cell.border = {
-                            top: { style: 'thin' }, bottom: { style: 'thin' },
-                            left: { style: 'thin' }, right: { style: 'thin' }
-                        };
-                        cell.alignment = { vertical: 'middle', wrapText: true };
-                        if (c === 4 || c === 5 || c === 8) {
-                            cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-                        }
-                    }
-
-                    row++;
-                });
-            });
-
-            // Автофильтр
-            ws.autoFilter = { from: 'A1', to: `I${row - 1}` };
-
-            // Условное форматирование по статусам доставки (колонка B — 8 статусов)
-            const lastDataRow = row - 1;
-            if (lastDataRow >= 2) {
-                ws.addConditionalFormatting({
-                    ref: `B2:B${lastDataRow}`,
-                    rules: [
-                        //  Зелёные: Доставлен, Готов к выдаче
-                        { type: 'containsText', operator: 'containsText', text: 'Доставлен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
-                        { type: 'containsText', operator: 'containsText', text: 'Готов к выдаче', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
-                        //  Жёлтые: Передаётся, Передан, В пути
-                        { type: 'containsText', operator: 'containsText', text: 'Передаётся', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                        { type: 'containsText', operator: 'containsText', text: 'Передан', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                        { type: 'containsText', operator: 'containsText', text: 'В пути', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                        //  Красно-розовый: Отменён
-                        { type: 'containsText', operator: 'containsText', text: 'Отменён', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
-                        //  Серо-голубой: Собирается, Обрабатывается
-                        { type: 'containsText', operator: 'containsText', text: 'Собирается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
-                        { type: 'containsText', operator: 'containsText', text: 'Обрабатывается', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D9E2F3' } }, font: { color: { argb: '1F3864' } } } },
-                    ]
-                });
+            // ExcelJS подключается @require (userscript) / manifest (расширение).
+            // Если он не загрузился — показываем понятную ошибку, а не роняем скрипт.
+            if (typeof ExcelJS === 'undefined') {
+                showToast('❌ ExcelJS не загружен. Проверьте подключение библиотеки (см. @require) и обновите страницу.', 'error');
+                btn.style.opacity = '1';
+                btn.style.pointerEvents = 'auto';
+                btn.innerHTML = '📥 XLSX с фото';
+                return;
             }
 
-            // Условное форматирование по статусам оплаты (колонка F)
-            ws.addConditionalFormatting({
-                ref: `F2:F${lastDataRow}`,
-                rules: [
-                    { type: 'containsText', operator: 'containsText', text: 'Оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'C6EFCE' } }, font: { color: { argb: '006100' } } } },
-                    { type: 'containsText', operator: 'containsText', text: 'Не оплачен', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } }, font: { color: { argb: '9C0006' } } } },
-                    { type: 'containsText', operator: 'containsText', text: 'При получении', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                    { type: 'containsText', operator: 'containsText', text: 'Ожидает оплаты', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                    { type: 'containsText', operator: 'containsText', text: 'Частично', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } }, font: { color: { argb: '9C5700' } } } },
-                    { type: 'containsText', operator: 'containsText', text: 'Возврат', style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'E4DFEC' } }, font: { color: { argb: '4F2F6C' } } } },
-                ]
-            });
-
-            // Итоговая строка с формулой SUMIF (не учитывает отменённые)
-            const summaryRow = row;
-            const summaryFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D6E4F0' } };
-            ws.mergeCells(summaryRow, 4, summaryRow, 5);
-            ws.getCell(summaryRow, 4).value = 'ИТОГО (без отмен):';
-            ws.getCell(summaryRow, 4).font = { bold: true, size: 12 };
-            ws.getCell(summaryRow, 4).alignment = { horizontal: 'right', vertical: 'middle' };
-            ws.getCell(summaryRow, 4).fill = summaryFill;
-            ws.getCell(summaryRow, 5).fill = summaryFill;
-            ws.getCell(summaryRow, 6).value = {
-                formula: `SUMIF(B2:B${lastDataRow},"<>❌ Отменён",E2:E${lastDataRow})`
-            };
-            ws.getCell(summaryRow, 6).font = { bold: true, size: 12 };
-            ws.getCell(summaryRow, 6).numFmt = '#,##0.00';
-            ws.getCell(summaryRow, 6).fill = summaryFill;
-            for (let c = 1; c <= 9; c++) {
-                ws.getCell(summaryRow, c).border = {
-                    top: { style: 'double' }, bottom: { style: 'thin' },
-                    left: { style: 'thin' }, right: { style: 'thin' }
-                };
-            }
+            const workbook = buildXlsxWorkbook(deduped, imageCache);
 
             // Шаг 5: Сохраняем и скачиваем
             btn.innerHTML = '💾 Сохраняю...';
@@ -2677,7 +2963,8 @@
                 const d = (o.date || '').replace(/\|/g, '\\|');
                 const st = (o.deliveryStatus || '').replace(/\|/g, '\\|');
                 const fa = (o.fallbackAmount || '').replace(/\|/g, '\\|');
-                L(`| ${o.orderNumber} | ${st} | ${d} | ${pp} | ${itemsCount} | ${fa} |`);
+                const on = (o.orderNumber || '').replace(/\|/g, '\\|');
+                L(`| ${on} | ${st} | ${d} | ${pp} | ${itemsCount} | ${fa} |`);
             });
             L('');
         }
@@ -2900,14 +3187,7 @@
             const orders = parseOrders();
 
             // Дедупликация (как в copyOrders/downloadXLSX)
-            const seenNumbers = new Set();
-            const deduped = [];
-            for (const o of orders) {
-                if (!seenNumbers.has(o.orderNumber)) {
-                    seenNumbers.add(o.orderNumber);
-                    deduped.push(o);
-                }
-            }
+            const deduped = dedupeOrders(orders);
 
             if (deduped.length === 0) {
                 // Даже если заказы не найдены — всё равно формируем отчёт
@@ -3011,17 +3291,15 @@
                 const fetchImage = async (url) => {
                     if (imageCache.has(url)) return;
                     try {
-                        const resp = await fetch(url);
+                        // Фото: 30 с на запрос, БЕЗ retry (тяжёлые файлы, retry не поможет).
+                        const resp = await fetchWithTimeout(url, { ms: 30000 });
                         if (!resp.ok) {
                             Diagnostics.logImage(url, resp.status, 0, 'HTTP_ERROR',
                                 `HTTP ${resp.status} ${resp.statusText}`);
                             return;
                         }
                         const buffer = await resp.arrayBuffer();
-                        let ext = 'jpeg';
-                        if (url.includes('.png')) ext = 'png';
-                        else if (url.includes('.webp')) ext = 'webp';
-                        else if (url.includes('.gif')) ext = 'gif';
+                        const ext = detectImageType(buffer, url, resp.headers.get('content-type'));
                         imageCache.set(url, { buffer, extension: ext });
                         Diagnostics.logImage(url, resp.status, buffer.byteLength, 'CACHED', '');
                     } catch(e) {
@@ -3119,13 +3397,29 @@
         diagBtn.addEventListener('click', exportDiagnostics);
         document.body.appendChild(diagBtn);
 
-        console.log('[Ozon Copier v9.13] Кнопки добавлены');
+        console.log('[Ozon Copier v9.15] Кнопки добавлены');
     }
 
     // ============================================================
     // 14. ЗАПУСК
     // ============================================================
     function init() {
+        // Защита от повторного патчинга history (повторные вызовы init при перезапуске скрипта):
+        // если флаг уже установлен — не патчим повторно pushState/replaceState.
+        if (!window.__ozonCopierPatched) {
+            window.__ozonCopierPatched = true;
+            const origPush = history.pushState;
+            history.pushState = function() {
+                origPush.apply(this, arguments);
+                setTimeout(addButton, 2000);
+            };
+            const origReplace = history.replaceState;
+            history.replaceState = function() {
+                origReplace.apply(this, arguments);
+                setTimeout(addButton, 2000);
+            };
+        }
+
         const waitAndAdd = () => setTimeout(addButton, 1500);
 
         if (document.readyState === 'loading') {
@@ -3139,24 +3433,48 @@
             const hasCards = document.querySelector('SECTION.d9w_11')
                 || document.querySelector('.w9d_11')
                 || document.querySelector('a[href*="/my/orderdetails/?order="]');
+            // Флаг-дедупликация: если кнопки уже добавлены — addButton не вызываем.
+            // НЕ используем disconnect(): после disconnect кнопки пропадут при SPA-переходах.
             if (!document.querySelector('.ozon-copy-btn') && hasCards) {
                 addButton();
             }
         });
-        observer.observe(document.body, { childList: true, subtree: true });
 
-        const origPush = history.pushState;
-        history.pushState = function() {
-            origPush.apply(this, arguments);
-            setTimeout(addButton, 2000);
-        };
-        const origReplace = history.replaceState;
-        history.replaceState = function() {
-            origReplace.apply(this, arguments);
-            setTimeout(addButton, 2000);
-        };
+        // Защита от раннего старта: document.body может быть null
+        // (например, скрипт запущен до построения DOM). Ждём DOMContentLoaded.
+        if (!document.body) {
+            document.addEventListener('DOMContentLoaded', () => {
+                observer.observe(document.body, { childList: true, subtree: true });
+            });
+        } else {
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
     }
 
-    init();
+    // F1: гард для Node-тестов (node --test). В браузере module не определён —
+    // выполняется init(); в Node экспортируем чистые функции, не трогая DOM.
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = {
+            yearForOrderMonth,
+            yearForDeliveryMonth,
+            parsePrice,
+            normalizeStatus,
+            normalizePaymentStatus,
+            parseRussianDate,
+            parseDeliveryDate,
+            escapeHtml,
+            backoffDelay,
+            formatTSV,
+            dedupeOrders,
+            fetchWithTimeout,
+            fetchOrderDetails,
+            detectImageType,
+            extractComposerAction,
+            buildXlsxWorkbook,
+            downloadXLSX
+        };
+    } else {
+        init();
+    }
 
 })();
