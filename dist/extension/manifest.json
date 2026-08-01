@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Ozon Order Copier",
+  "version": "9.15",
+  "description": "Экспорт заказов Ozon в Excel и буфер обмена с фото товаров. После установки на странице 'Мои заказы' появляются кнопки для копирования и скачивания.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.ozon.ru/my/orderlist*",
+        "https://ozon.ru/my/orderlist*"
+      ],
+      "js": ["lib/exceljs.min.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "https://cdn1.ozon.ru/*",
+    "https://cdn2.ozon.ru/*",
+    "https://cdn3.ozon.ru/*",
+    "https://cdn4.ozon.ru/*",
+    "https://cdn5.ozon.ru/*",
+    "https://cdn6.ozon.ru/*",
+    "https://cdn7.ozon.ru/*",
+    "https://cdn8.ozon.ru/*",
+    "https://cdn9.ozon.ru/*",
+    "https://ir.ozone.ru/*",
+    "https://ir.ozon.ru/*"
+  ],
+  "permissions": [
+    "clipboardWrite"
+  ]
+}

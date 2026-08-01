@@ -68,17 +68,29 @@ TSV и XLSX экспортируются в едином виде — **10 ко�
 | Chrome / Edge  | [Tampermonkey в Chrome Web Store](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) |
 | Firefox | [Tampermonkey в Firefox Add-ons](https://addons.mozilla.org/firefox/addon/tampermonkey/) |
 
-### 2. Установите скрипт
+### 2. Установите скрипт (Tampermonkey)
 
-1. Откройте Tampermonkey → **Создать новый скрипт**
-2. Скопируйте содержимое [`ozon-orders-copier.user.js`](ozon-orders-copier.user.js)
-3. Вставьте в редактор и нажмите **Сохранить** (`Ctrl+S`)
+В репозитории скрипт поставляется как **собранный артефакт** — [`dist/ozon-orders-copier.user.js`](dist/ozon-orders-copier.user.js). Не редактируйте его вручную — правки вносятся в исходники [`src/`](src/), а артефакт пересобирается (см. [Разработка и сборка](#-разработка-и-сборка)).
 
-### 3. Авторизуйтесь на Ozon
+1. Откройте Tampermonkey → **Утилиты** → **Импортировать из файла**
+2. Выберите файл `dist/ozon-orders-copier.user.js` — либо просто **перетащите** его в окно браузера (Tampermonkey предложит установку)
+3. Подтвердите установку в открывшемся окне
+
+> 💡 Альтернатива — установка по URL: Tampermonkey → **Утилиты** → «Установить из URL» и укажите ссылку на собранный файл (например, из GitHub Releases).
+
+### 3. Установите Chrome-расширение
+
+> ⚠️ Расширение собирается из исходников и поставляется как готовая папка [`dist/extension/`](dist/extension/).
+
+1. Убедитесь, что расширение собрано (см. [Разработка и сборка](#-разработка-и-сборка))
+2. Откройте Chrome → `chrome://extensions` → включите **Режим разработчика** (переключатель в правом верхнем углу)
+3. Нажмите **«Загрузить распакованное расширение»** и выберите папку `dist/extension/`
+
+### 4. Авторизуйтесь на Ozon
 
 > ⚠️ **Важно:** Скрипт работает **только с вашими собственными заказами**. Необходимо быть авторизованным на [ozon.ru](https://www.ozon.ru) под своей учётной записью.
 
-### 4. Перейдите на страницу заказов
+### 5. Перейдите на страницу заказов
 
 Откройте **[https://www.ozon.ru/my/orderlist](https://www.ozon.ru/my/orderlist)** — кнопки появятся в правом нижнем углу.
 
@@ -92,15 +104,83 @@ python generate_template.py
 # Создастся файл Ozon_Заказы_шаблон.xlsx
 ```
 
+## 🛠 Разработка и сборка
+
+Проект построен по принципу **единый источник истины + сборка**: вся логика живёт в [`src/`](src/), а устанавливаемые файлы собираются в [`dist/`](dist/). Это заменило старую модель «двух копий» (userscript и content.js, которые приходилось синхронизировать вручную).
+
+### Структура исходников
+
+| Путь | Назначение |
+|---|---|
+| [`src/core/`](src/core/) | **Ядро** — 11 секций: constants, utils, net, dates, statuses, prices, diagnostics, parse, fetch, export-tsv, export-xlsx. Порядок секций задаёт [`src/core/index.js`](src/core/index.js) |
+| [`src/platforms/`](src/platforms/) | **Тонкие обёртки платформ**: [`userscript.js`](src/platforms/userscript.js) (шапка `==UserScript==`, GM-стили, `GM_setClipboard`) и [`extension.js`](src/platforms/extension.js) (header, `STYLE_CSS`, инжекция, `navigator.clipboard`) |
+| [`src/ui/ui.js`](src/ui/ui.js) | **Общий UI** — кнопки, предпросмотр, toast, init (единый для обеих платформ) |
+| [`build/build.js`](build/build.js) | **Скрипт сборки** — читает `src/`, подставляет версию, собирает артефакты в `dist/` |
+| [`extension/`](extension/) | **Шаблон расширения** — `manifest.json`, `lib/exceljs.min.js`, `icons/` (исходники для сборки) |
+| [`dist/`](dist/) | **Собранные артефакты (канон для установки)** — не редактировать вручную |
+
+### Команды
+
+```bash
+npm run build   # собирает оба артефакта: dist/ozon-orders-copier.user.js и dist/extension/
+npm test        # pretest автоматически собирает dist/, затем гоняет тесты (73/73)
+```
+
+### Единое версионирование
+
+Версия задаётся **один раз** — константой `SCRIPT_VERSION` в [`src/core/constants.js`](src/core/constants.js). Сборка автоматически подставляет её:
+
+- в шапку userscript (`// @version`, `@name`, `@description`);
+- в `manifest.json` расширения;
+- в лог скрипта.
+
+Правьте версию **только** в `src/core/constants.js` — остальное подставит `npm run build`.
+
+### Порядок работы
+
+1. Правите исходники в [`src/`](src/)
+2. `npm run build` — артефакты пересобираются в [`dist/`](dist/)
+3. Загружаете `dist/ozon-orders-copier.user.js` в Tampermonkey или папку `dist/extension/` в Chrome
+4. Проверяете: `npm test` (собирает и гоняет тесты)
+
 ## 📁 Структура проекта
 
 ```
-├── ozon-orders-copier.user.js    # Основной Tampermonkey-скрипт (v9.15)
-├── lib/exceljs.min.js            # Локальная копия ExcelJS (запасной вариант для userscript, синхронна с extension/lib/)
-├── extension/                    # Chrome-расширение (Manifest V3)
-│   ├── content.js                #   Логика расширения (синхронна со скриптом)
-│   ├── manifest.json             #   Манифест (версия 9.15)
-│   └── lib/exceljs.min.js        #   ExcelJS, локальная копия
+├── src/                          # Исходники (единый источник истины)
+│   ├── core/                     #   Ядро — 11 секций (порядок в src/core/index.js)
+│   │   ├── index.js              #     Порядок секций ядра (11 модулей для сборки)
+│   │   ├── constants.js          #     SCRIPT_VERSION — единственная точка версии
+│   │   ├── utils.js              #     Утилиты (escapeHtml, backoffDelay, dedupe…)
+│   │   ├── net.js                #     Сеть (fetchWithTimeout, fetchImage…)
+│   │   ├── dates.js              #     Даты (parseRussianDate, parseDeliveryDate…)
+│   │   ├── statuses.js           #     Статусы (normalizeStatus, normalizePaymentStatus…)
+│   │   ├── prices.js             #     Цены (parsePrice…)
+│   │   ├── diagnostics.js        #     Диагностика (Diagnostics, отчёт)
+│   │   ├── parse.js              #     Парсинг (parseOrder, parseOrdersFromStateJSON…)
+│   │   ├── fetch.js              #     Загрузка деталей заказов
+│   │   ├── export-tsv.js         #     Экспорт в TSV (formatTSV)
+│   │   └── export-xlsx.js        #     Экспорт в XLSX (buildXlsxWorkbook, downloadXLSX)
+│   ├── platforms/                #   Обёртки платформ
+│   │   ├── userscript.js         #     Tampermonkey: шапка ==UserScript==, GM-стили, GM-copy
+│   │   └── extension.js          #     Chrome MV3: header, STYLE_CSS, инжекция, navigator-copy
+│   └── ui/ui.js                  #   Общий UI (showPreview…init)
+├── build/build.js                # Скрипт сборки (npm run build)
+├── dist/                         # Собранные артефакты (канон для установки)
+│   ├── ozon-orders-copier.user.js
+│   └── extension/
+│       ├── content.js
+│       ├── manifest.json
+│       ├── lib/exceljs.min.js
+│       └── icons/
+├── extension/                    # Шаблон расширения (исходники для сборки)
+│   ├── manifest.json
+│   ├── lib/exceljs.min.js
+│   └── icons/
+├── tests/                        # Автотесты (npm test)
+│   ├── build-integrity.test.js   #   Целостность сборки (гард 17 функций, версия, IIFE)
+│   ├── unit.test.js
+│   ├── fetch-timeout.test.js
+│   └── xlsx-structure.test.js
 ├── generate_template.py          # Python-скрипт генерации Excel-шаблона
 ├── DEVTOLFS_INSTRUCTIONS.md      # Инструкция по отладке (для разработчиков)
 ├── README.md                     # Этот файл
@@ -114,13 +194,13 @@ python generate_template.py
 
 ## 🔄 Соответствие версий расширения и скрипта
 
-Начиная с **v9.15** версия манифеста расширения синхронизирована с версией скрипта:
+Начиная с **v9.15** версия манифеста расширения синхронизирована с версией скрипта. После рефакторинга (Фаза E) версия задаётся в **одном месте** — `SCRIPT_VERSION` в [`src/core/constants.js`](src/core/constants.js) — и автоматически подставляется сборкой во все артефакты (`@version` userscript, `manifest.json`, лог).
 
 | Версия расширения (manifest) | Версия скрипта | Статус |
 |---|---|---|
 | 1.1.1 | 9.14 | Предыдущий релиз |
 | 1.2.0 | 9.15 | Историческая альтернатива (не выпускалась, версия расширения синхронизирована в 9.15) |
-| **9.15** | **9.15** | **Текущий релиз — версии синхронизированы** |
+| **9.15** | **9.15** | **Текущий релиз — единая версия из `src/core/constants.js`** |
 
 ## 🔒 Приватность
 
@@ -132,12 +212,15 @@ python generate_template.py
 ## 🛠 Технический стек
 
 - **JavaScript** (Tampermonkey UserScript + Chrome-расширение Manifest V3)
-- **ExcelJS** — библиотека для генерации `.xlsx` (userscript: через CDN `@require` + локальная копия в `lib/` как запасной вариант; расширение: локальная копия в `extension/lib/`)
+- **ExcelJS** — библиотека для генерации `.xlsx`. Userscript подключает её через CDN `@require` (jsdelivr, фиксированная версия 4.4.0) в шапке [`src/platforms/userscript.js`](src/platforms/userscript.js); расширение использует локальную копию `extension/lib/exceljs.min.js` (копируется в `dist/extension/lib/` при сборке)
+- **Node.js** — сборка (`npm run build`) и тесты (`npm test`)
 - **Python 3 + openpyxl** — для [`generate_template.py`](generate_template.py)
 
 ## 🧪 Тесты
 
-- Автотесты чистой логики: `npm test` (Node ≥ 18, без внешних зависимостей)
+- Автотесты **собранного кода** из `dist/`: `npm test` (Node ≥ 18, без внешних зависимостей) — **73/73 зелёных**
+- `pretest` автоматически собирает `dist/` перед прогоном — тесты всегда проверяют актуальный артефакт
+- [`tests/build-integrity.test.js`](tests/build-integrity.test.js) — целостность сборки: гард экспортирует ровно 17 функций, артефакты существуют в `dist/`, `SCRIPT_VERSION` едина во всех источниках, одинарная IIFE-обёртка
 - **Обязательный шаг перед каждым релизом** — релиз не выполняется без зелёного прогона
 
 ## 📝 Лицензия
@@ -146,4 +229,4 @@ python generate_template.py
 
 ---
 
-> **Версия:** 9.15 | **Обновлено:** 31 июля 2026
+> **Версия:** 9.15 | **Обновлено:** 1 августа 2026

@@ -1,7 +1,12 @@
 // ============================================================
 // Юнит-тесты чистой логики (F2) + COMPOSER_ACTION (F3).
-// Один набор прогоняется против ОБОИХ файлов (userscript и
-// extension/content.js) — параметризованно.
+// Этап 4 рефакторинга: архитектура переведена на единое ядро
+// (src/core/), сборка даёт dist/ozon-orders-copier.user.js и
+// dist/extension/content.js. Оба артефакта собираются из одного
+// ядра, поэтому тесты идут по ЕДИНОМУ источнику — собранному
+// userscript (у него тот же гард module.exports, что и у
+// extension/content.js). Ядро одно — тестировать можно любой из
+// собранных артефактов, для единообразия выбран userscript.
 // Относительные даты: годы не хардкодим, генерируем через
 // new Date(year, month±1, 1).
 // ============================================================
@@ -11,13 +16,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const userScript = require('../ozon-orders-copier.user.js');
-const extension = require('../extension/content.js');
+const userScript = require('../dist/ozon-orders-copier.user.js');
 const { createExcelJsStub } = require('./stubs/exceljs-stub.js');
 
 const implementations = [
-    { name: 'userscript', m: userScript },
-    { name: 'extension', m: extension }
+    { name: 'userscript', m: userScript }
 ];
 
 // Ожидаемые HTML-сущности собираем конкатенацией, чтобы исходник
@@ -335,6 +338,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
+            // Этап 4: ядро использует DI — стаб передаётся третьим аргументом (ExcelJSRef).
             m.buildXlsxWorkbook([{
                 orderNumber: '12345678-0004',
                 date: '06.07.2026',
@@ -346,7 +350,7 @@ for (const { name, m } of implementations) {
                 items: [
                     { name: '=SUM(A1)', price: '100', qty: '1', shipmentStatus: '✅ Доставлен', deliveryDate: '', paymentStatus: '', picture: '' }
                 ]
-            }], new Map());
+            }], new Map(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }

@@ -6,6 +6,10 @@
 //  - retry-цепочка fetchOrderDetails: после исчерпания попыток
 //    результат содержит error (текст таймаута), fetch вызван 3 раза.
 // Фейковый fetch подменяется через global.fetch.
+// Этап 4 рефакторинга: оба артефакта (userscript и extension)
+// собираются из единого ядра src/core/, поэтому тест идёт по
+// ЕДИНОМУ источнику — собранному dist/ozon-orders-copier.user.js
+// (у него тот же гард module.exports, что и у dist/extension/content.js).
 // ============================================================
 
 'use strict';
@@ -13,12 +17,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const userScript = require('../ozon-orders-copier.user.js');
-const extension = require('../extension/content.js');
+const userScript = require('../dist/ozon-orders-copier.user.js');
 
 const implementations = [
-    { name: 'userscript', m: userScript },
-    { name: 'extension', m: extension }
+    { name: 'userscript', m: userScript }
 ];
 
 // Фейковый fetch: pending до abort сигнала, отклоняет с signal.reason.

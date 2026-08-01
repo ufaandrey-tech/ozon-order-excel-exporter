@@ -1,9 +1,14 @@
 // ============================================================
 // F4: Тест XLSX-структуры (юнит-тест структуры, НЕ генерация
 // .xlsx-файла). Прогоняется через стаб-объект ExcelJS
-// (tests/stubs/exceljs-stub.js) против ОБОИХ файлов.
-// buildXlsxWorkbook использует глобальный ExcelJS — перед
-// вызовом устанавливаем global.ExcelJS = стаб.
+// (tests/stubs/exceljs-stub.js).
+// Этап 4 рефакторинга: оба артефакта (userscript и extension)
+// собираются из единого ядра src/core/, поэтому тест идёт по
+// ЕДИНОМУ источнику — собранному dist/ozon-orders-copier.user.js
+// (у него тот же гард module.exports, что и у dist/extension/content.js).
+// Ядро (src/core/export-xlsx.js) использует DI: стаб ExcelJS
+// передаётся ТРЕТЬИМ аргументом buildXlsxWorkbook(deduped, imageCache,
+// ExcelJSRef). global.ExcelJS больше не нужен.
 // ============================================================
 
 'use strict';
@@ -14,12 +19,10 @@ const path = require('node:path');
 
 const { createExcelJsStub } = require('./stubs/exceljs-stub.js');
 
-const userScript = require('../ozon-orders-copier.user.js');
-const extension = require('../extension/content.js');
+const userScript = require('../dist/ozon-orders-copier.user.js');
 
 const implementations = [
-    { name: 'userscript', m: userScript },
-    { name: 'extension', m: extension }
+    { name: 'userscript', m: userScript }
 ];
 
 // --- Фикстура заказа с фото, отменённым и обычным ---
@@ -85,7 +88,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -100,7 +103,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -121,7 +124,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -135,7 +138,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -149,7 +152,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -167,7 +170,7 @@ for (const { name, m } of implementations) {
         try {
             // imageCache пустой → картинка не вставлена, должен быть URL в (row, 10)
             const cache = new Map();
-            m.buildXlsxWorkbook(makeOrders(), cache);
+            m.buildXlsxWorkbook(makeOrders(), cache, ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -181,7 +184,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }
@@ -198,7 +201,7 @@ for (const { name, m } of implementations) {
         const prev = global.ExcelJS;
         global.ExcelJS = ExcelJS;
         try {
-            m.buildXlsxWorkbook(makeOrders(), makeImageCache());
+            m.buildXlsxWorkbook(makeOrders(), makeImageCache(), ExcelJS);
         } finally {
             global.ExcelJS = prev;
         }

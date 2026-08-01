@@ -10,17 +10,10 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
-# Локальная копия ExcelJS для userscript (как extension/lib/ — D5)
-# Сначала исключаем содержимое корневого lib/, затем возвращаем exceljs.min.js.
-# Ведущий "/" ограничивает правило корнем репозитория — extension/lib/ не затрагивается.
-/lib/*
-!/lib/exceljs.min.js
 lib64/
 parts/
 sdist/
@@ -74,6 +67,6 @@ plans/
 diagn/
 
 # ── Chrome Extension ──────────────────────────────────
-# extension/lib/exceljs.min.js уже в git; правило /lib/* действует только на корневой lib/
+# extension/lib/exceljs.min.js уже в git (исходник для копирования в dist/extension/)
 # generate_icons.py — утилита сборки, не для репозитория
 extension/generate_icons.py
