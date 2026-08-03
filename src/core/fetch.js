@@ -66,6 +66,12 @@
                 Diagnostics.snapshotRawData(orderNumber, null, null, _widgetsJSON.join('\n---WIDGET---\n'));
             }
 
+            // Дата доставки: результат последнего распознанного shipmentWidget
+            // (объявлена ЗДЕСЬ, на уровне fetchOrderDetailsOnce, т.к. используется
+            // в return функции (см. { items, address, orderDate, deliveryDate });
+            // внутри shipmentWidgets.forEach она только присваивается)
+            let deliveryDate = '';
+
             shipmentWidgets.forEach(el => {
                 const raw = el.getAttribute('data-state') || '';
                 if (!raw) return;
@@ -91,7 +97,6 @@
                     }
 
                     // Дата доставки: собираем тексты из header[*] (header[1] и соседние)
-                    let deliveryDate = '';
                     try {
                         const headerTexts = [];
                         const headers = Array.isArray(json.header) ? json.header : [];
