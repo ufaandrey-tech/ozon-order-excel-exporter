@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.15 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.16 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.15
-// @description  Копирует заказы Ozon v9.15: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.16
+// @description  Копирует заказы Ozon v9.16: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*

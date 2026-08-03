@@ -45,13 +45,17 @@ const OUT_USERS = path.join(DIST_DIR, 'ozon-orders-copier.user.js');
 const OUT_EXT_JS = path.join(DIST_EXT_DIR, 'content.js');
 const OUT_MANIFEST = path.join(DIST_EXT_DIR, 'manifest.json');
 
-// Экспорты гарда (17 функций; группы задают переносы строк в гарде —
+// Экспорты гарда (23 функции; группы задают переносы строк в гарде —
 // порядок и состав фиксированы — см. src/ui/ui.js и ядро src/core/).
+// Фаза E: +parseOrdersV2JSON (чистое ядро), +formatAmount, +getPath
+// (утилиты), +createParseResult, +buildDiagnosticsMarkdown (диагностика),
+// +extractAddressFromDoc (E5 — тестируется через гард).
 const EXPORT_GROUPS = [
     ['yearForOrderMonth', 'yearForDeliveryMonth', 'parsePrice'],
     ['normalizeStatus', 'normalizePaymentStatus', 'parseRussianDate'],
     ['parseDeliveryDate', 'escapeHtml', 'backoffDelay', 'formatTSV'],
-    ['dedupeOrders', 'fetchWithTimeout', 'fetchOrderDetails'],
+    ['dedupeOrders', 'fetchWithTimeout', 'fetchOrderDetails', 'extractAddressFromDoc'],
+    ['parseOrdersV2JSON', 'formatAmount', 'getPath', 'createParseResult', 'buildDiagnosticsMarkdown'],
     ['detectImageType', 'extractComposerAction', 'buildXlsxWorkbook', 'downloadXLSX']
 ];
 const EXPORTS = EXPORT_GROUPS.flat();
@@ -402,7 +406,7 @@ function run() {
 
     const okUs = v.cmpUs.missingInBuilt.length === 0 && v.cmpUs.missingInSrc.length === 0;
     const okExt = v.cmpExt.missingInBuilt.length === 0 && v.cmpExt.missingInSrc.length === 0;
-    console.log('Структурное сравнение с исходниками src/ (17 экспортов):');
+    console.log(`Структурное сравнение с исходниками src/ (${EXPORTS.length} экспортов):`);
     console.log(`  userscript vs src/: ${okUs ? 'OK' : 'ПРОБЛЕМА'} (${EXPORTS.length}/${EXPORTS.length})`);
     if (!okUs) {
         if (v.cmpUs.missingInBuilt.length) console.log(`    нет в собранном: ${v.cmpUs.missingInBuilt.join(', ')}`);

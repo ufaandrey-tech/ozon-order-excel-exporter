@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.15 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.16 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.15
-// @description  Копирует заказы Ozon v9.15: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.16
+// @description  Копирует заказы Ozon v9.16: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.15';
+    const SCRIPT_VERSION = '9.16';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -313,7 +313,7 @@
 //   safeCell (717–722).
 // Зависимости: нет (чистые функции, DOM/GM не читают).
 // Объявляет: escapeHtml, backoffDelay, extractComposerAction,
-//   dedupeOrders, safeCell.
+//   dedupeOrders, safeCell, getPath, formatAmount.
 // ============================================================
 
     // ============================================================
@@ -390,6 +390,31 @@
         const s = String(value);
         if (s === '') return '';
         return /^[=+\-@]/.test(s) ? "'" + s : s;
+    }
+
+    // Безопасный доступ по пути 'a.b.c' и 'a.b[0].c'. Если путь не найден —
+    // возвращает fallback. НЕ логирует и НЕ бросает исключений (чистая).
+    function getPath(obj, path, fallback) {
+        const parts = String(path).split('.');
+        let cur = obj;
+        for (const p of parts) {
+            const m = p.match(/^(\w+)\[(\d+)\]$/);   // сегмент с индексом: price[0]
+            if (m) {
+                const key = m[1], idx = +m[2];
+                if (cur == null || typeof cur !== 'object' || !(key in cur)
+                    || !Array.isArray(cur[key]) || !(idx in cur[key])) return fallback;
+                cur = cur[key][idx];
+            } else {
+                if (cur == null || typeof cur !== 'object' || !(p in cur)) return fallback;
+                cur = cur[p];
+            }
+        }
+        return cur === undefined ? fallback : cur;
+    }
+
+    // Число → строка суммы: целые без дробной части, дробные — с запятой.
+    function formatAmount(num) {
+        return num % 1 === 0 ? String(num) : num.toFixed(2).replace('.', ',');
     }
 // ============================================================
 // СЕКЦИЯ: src/core/net.js
@@ -839,7 +864,7 @@
         const cleaned = text.replace(/[^\d,.]/g, '').replace(',', '.');
         const num = parseFloat(cleaned);
         if (isNaN(num)) return '';
-        return num % 1 === 0 ? num.toString() : num.toFixed(2).replace('.', ',');
+        return formatAmount(num);
     }
 // ============================================================
 // СЕКЦИЯ: src/core/diagnostics.js
@@ -856,7 +881,7 @@
 //   из того же скоупа.
 // Платформа: window/navigator ТОЛЬКО в рантайм-методах Diagnostics;
 // buildDiagnosticsMarkdown — чистый (env передаётся параметром).
-// Объявляет: Diagnostics, buildDiagnosticsMarkdown.
+// Объявляет: createParseResult, Diagnostics, buildDiagnosticsMarkdown.
 // ============================================================
     // ============================================================
     // 1b. ДИАГНОСТИЧЕСКИЙ МОДУЛЬ
@@ -868,6 +893,21 @@
     //   - parseResults[]:   заказ → поле → ожидаемый путь → фактическое значение → OK/FAIL
     //   - imageLogs[]:      url → HTTP-статус → байты → результат вставки в Excel
     // ============================================================
+    // ЧИСТАЯ функция: создаёт запись diff-отчёта со статусом OK / FAIL / N/A.
+    // Экспортируется гардом и тестируется (E4). Diagnostics.logParseResult вызывает её.
+    function createParseResult(orderNumber, field, expectedPath, actualValue, notApplicable) {
+        return {
+            timestamp: new Date().toISOString(),
+            orderNumber: orderNumber || '',
+            field: field || '',
+            expectedPath: expectedPath || '',
+            actualValue: (actualValue == null ? '' : (
+                typeof actualValue === 'string' ? actualValue : JSON.stringify(actualValue)
+            )),
+            status: notApplicable ? 'N/A' : (actualValue ? 'OK' : 'FAIL')
+        };
+    }
+
     const Diagnostics = {
         enabled: false,
         errors: [],
@@ -901,16 +941,9 @@
         },
 
         /** Зафиксировать результат извлечения конкретного поля. */
-        logParseResult(orderNumber, field, expectedPath, actualValue) {
+        logParseResult(orderNumber, field, expectedPath, actualValue, notApplicable) {
             if (!this.enabled) return;
-            this.parseResults.push({
-                timestamp: new Date().toISOString(),
-                orderNumber: orderNumber || '',
-                field: field || '',
-                expectedPath: expectedPath || '',
-                actualValue: this._toString(actualValue),
-                status: actualValue ? 'OK' : 'FAIL'
-            });
+            this.parseResults.push(createParseResult(orderNumber, field, expectedPath, actualValue, notApplicable));
         },
 
         /** Сохранить сырой снимок DOM/JSON для заказа (для воспроизведения проблемы).
@@ -1010,7 +1043,8 @@
     // Принимает env (метаданные) и deduped (список распарсенных заказов).
     // Возвращает одну большую строку Markdown со всеми секциями.
     // ------------------------------------------------------------
-    function buildDiagnosticsMarkdown(env, deduped) {
+    function buildDiagnosticsMarkdown(env, deduped, state) {
+        state = state || Diagnostics;
         const lines = [];
         const L = (s) => lines.push(s);
         const now = new Date();
@@ -1050,12 +1084,12 @@
         L('| Метрика | Значение |');
         L('|---|---|');
         L(`| Найдено заказов (после дедупликации) | ${deduped.length} |`);
-        L(`| Всего ошибок | ${Diagnostics.errors.length} |`);
-        L(`| parse-результатов (diff) | ${Diagnostics.parseResults.length} |`);
-        L(`| сырых снимков orderlist | ${Diagnostics.rawSnapshots.length} |`);
-        L(`| снимков orderdetails | ${Diagnostics.orderDetailsSnapshots.length} |`);
-        L(`| DOM-проб | ${Diagnostics.domProbes.length} |`);
-        L(`| записей о фото | ${Diagnostics.imageLogs.length} |`);
+        L(`| Всего ошибок | ${state.errors.length} |`);
+        L(`| parse-результатов (diff) | ${state.parseResults.length} |`);
+        L(`| сырых снимков orderlist | ${state.rawSnapshots.length} |`);
+        L(`| снимков orderdetails | ${state.orderDetailsSnapshots.length} |`);
+        L(`| DOM-проб | ${state.domProbes.length} |`);
+        L(`| записей о фото | ${state.imageLogs.length} |`);
         L('');
 
         // Краткая сводка по заказам (как их видит скрипт)
@@ -1084,10 +1118,10 @@
         L('Здесь показано, какие CSS-селекторы срабатывают на реальной странице, ');
         L('а какие — нет. Это ключ к обновлению логики извлечения адреса пункта выдачи.');
         L('');
-        if (Diagnostics.domProbes.length === 0) {
+        if (state.domProbes.length === 0) {
             L('_DOM-пробы не собирались (заказы не найдены или этап пропущен)._');
         } else {
-            Diagnostics.domProbes.forEach(probe => {
+            state.domProbes.forEach(probe => {
                 L(`### 📦 Заказ \`${probe.orderNumber || '—'}\` · scope: \`${probe.scope}\` · root: \`${probe.rootSelector}\``);
                 L('');
                 if (!probe.probes || probe.probes.length === 0) {
@@ -1128,17 +1162,17 @@
         // === 4. Diff парсинга ===
         L(`## 4. 🧪 Diff парсинга (ожидание vs факт)`);
         L('');
-        if (Diagnostics.parseResults.length === 0) {
+        if (state.parseResults.length === 0) {
             L('_parse-результатов нет._');
         } else {
             L('| # | Время | Заказ | Поле | Ожидаемый путь | Фактическое значение | Статус |');
             L('|---|---|---|---|---|---|---|');
-            Diagnostics.parseResults.forEach((pr, i) => {
+            state.parseResults.forEach((pr, i) => {
                 const val = (pr.actualValue || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 500);
                 const exp = (pr.expectedPath || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
                 const on = (pr.orderNumber || '').replace(/\|/g, '\\|');
                 const fld = (pr.field || '').replace(/\|/g, '\\|');
-                const st = pr.status === 'OK' ? '✅ OK' : '❌ FAIL';
+                const st = pr.status === 'OK' ? '✅ OK' : (pr.status === 'N/A' ? '🟡 N/A' : '❌ FAIL');
                 L(`| ${i + 1} | ${pr.timestamp} | ${on} | ${fld} | ${exp} | ${val} | ${st} |`);
             });
         }
@@ -1149,10 +1183,10 @@
         // === 5. Ошибки ===
         L(`## 5. ⚠️ Ошибки`);
         L('');
-        if (Diagnostics.errors.length === 0) {
+        if (state.errors.length === 0) {
             L('_Ошибок не зафиксировано._');
         } else {
-            Diagnostics.errors.forEach((err, i) => {
+            state.errors.forEach((err, i) => {
                 L(`### [${i + 1}] ${err.timestamp} · заказ \`${err.orderNumber || '—'}\``);
                 L('');
                 L(`- **Этап:** \`${err.stage || '—'}\``);
@@ -1178,10 +1212,10 @@
         // === 6. Сырые данные orderlist ===
         L(`## 6. 🗂 Сырые данные orderlist (cardHTML / stateOrderList / shipmentWidgets)`);
         L('');
-        if (Diagnostics.rawSnapshots.length === 0) {
+        if (state.rawSnapshots.length === 0) {
             L('_Сырых снимков orderlist нет._');
         } else {
-            Diagnostics.rawSnapshots.forEach((snap, i) => {
+            state.rawSnapshots.forEach((snap, i) => {
                 L(`### [${i + 1}] Заказ \`${snap.orderNumber || '—'}\``);
                 L('');
                 L(`- Время: ${snap.timestamp}`);
@@ -1228,10 +1262,10 @@
         // === 7. Снимки orderdetails ===
         L(`## 7. 📄 Снимки страниц orderdetails`);
         L('');
-        if (Diagnostics.orderDetailsSnapshots.length === 0) {
+        if (state.orderDetailsSnapshots.length === 0) {
             L('_Снимки orderdetails не собирались (этап fetch не выполнялся)._');
         } else {
-            Diagnostics.orderDetailsSnapshots.forEach((snap, i) => {
+            state.orderDetailsSnapshots.forEach((snap, i) => {
                 L(`### [${i + 1}] Заказ \`${snap.orderNumber || '—'}\``);
                 L('');
                 L(`- Время: ${snap.timestamp}`);
@@ -1257,12 +1291,12 @@
         // === 8. Фото ===
         L(`## 8. 🖼 Фото`);
         L('');
-        if (Diagnostics.imageLogs.length === 0) {
+        if (state.imageLogs.length === 0) {
             L('_Записей о фото нет._');
         } else {
             L('| # | Время | URL | HTTP | Байты | Результат | Ошибка |');
             L('|---|---|---|---|---|---|---|');
-            Diagnostics.imageLogs.forEach((il, i) => {
+            state.imageLogs.forEach((il, i) => {
                 const url = (il.url || '').replace(/\|/g, '\\|');
                 const err = (il.error || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
                 const res = il.result === 'CACHED' ? '✅ CACHED' : '❌ ' + (il.result || '');
@@ -1291,7 +1325,7 @@
 //   pickBestPaymentStatus, parsePrice, extractComposerAction,
 //   extractProductPaymentStatus, extractPaymentStatusFromAny.
 // Объявляет: parseOrder, extractPaymentFromOrderListJSON,
-//   parseOrdersFromStateJSON, parseOrders.
+//   parseOrdersV2JSON, parseOrdersFromStateJSON, parseOrders.
 // ============================================================
     // ============================================================
     // 5. ПАРСИНГ КАРТОЧКИ ЗАКАЗА
@@ -1479,7 +1513,7 @@
                 if (!isNaN(num)) total += num;
             });
             if (total > 0) {
-                fallbackAmount = total % 1 === 0 ? total.toString() : total.toFixed(2).replace('.', ',');
+                fallbackAmount = formatAmount(total);
             }
         }
         if (!fallbackAmount) {
@@ -1488,7 +1522,7 @@
                 const cleaned = amMatch[1].replace(/\s/g, '').replace(',', '.');
                 const num = parseFloat(cleaned);
                 if (!isNaN(num)) {
-                    fallbackAmount = num % 1 === 0 ? num.toString() : num.toFixed(2).replace('.', ',');
+                    fallbackAmount = formatAmount(num);
                 }
             }
         }
@@ -1728,6 +1762,285 @@
     // дату/время выдачи, товары с фото, цены, статусы оплаты.
     // Полные названия товаров и кол-во подтягиваются позже через
     // enrichOrdersWithProducts → fetchOrderDetails.
+
+    // ЧИСТОЕ ядро: массив ordersV2 → массив распарсенных заказов.
+    // НЕ читает document/DOM/window — только ordersArr и чистые функции.
+    // Все условия N/A (см. B2) вычисляются здесь и возвращаются на заказе
+    // массивом order._na = ['pickupPoint', 'paymentStatus', ...]
+    // (пустой/отсутствующий — N/A нет). Диагностика полей выполняется
+    // тонкой DOM-обёрткой parseOrdersFromStateJSON (у неё есть доступ к _na).
+    function parseOrdersV2JSON(ordersArr) {
+        if (!Array.isArray(ordersArr)) return [];
+
+        const orders = ordersArr.map((order, oi) => {
+            const leftBlock = order?.leftBlock || {};
+            const rightBlock = order?.rightBlock || {};
+            const _na = [];
+
+            // --- НОМЕР ЗАКАЗА из action.link ---
+            // link приходит с экранированными слешами; после JSON.parse это обычная строка.
+            // Поддерживаем два формата action:
+            //   1) BEHAVIOR_TYPE_REDIRECT — обычная ссылка с ?order=XXXXXXXX
+            //   2) BEHAVIOR_TYPE_COMPOSER_ACTION — составной/мульти-заказ, ссылка вида
+            //      v2/cacheOrderProducts?data=eyJwb3N0aW5ncyI6WyI1ODk1NzY0OS0wNTgzLTEi...
+            //      где data — base64 от JSON {"postings":["XXXXXXXX-NNN-1","XXXXXXXX-NNN-2",...]}.
+            //      Номер заказа — общий префикс до первого дефиса-сегмента отправления.
+            let orderNumber = '';
+            const linkCandidates = [
+                getPath(order, 'leftBlock.common.action.link', ''),
+                getPath(order, 'leftBlock.textIcon.common.action.link', ''),
+                getPath(order, 'leftBlock.title.common.action.link', ''),
+                getPath(order, 'rightBlock.products.common.action.link', ''),
+            ].filter(Boolean);
+            for (const lnk of linkCandidates) {
+                const s = String(lnk);
+                // Путь 1: обычная редирект-ссылка с ?order=
+                const mm = s.match(/order=(\d+(?:-?\d+)?)/);
+                if (mm) { orderNumber = mm[1]; break; }
+                // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
+                // Чистая логика вынесена в extractComposerAction (тестируется в F3).
+                const composerNumber = extractComposerAction(s);
+                if (composerNumber) { orderNumber = composerNumber; break; }
+            }
+
+            if (!orderNumber) {
+                return null;
+            }
+
+            // --- СТАТУС ---
+            const statusText = getPath(order, 'leftBlock.textIcon.text.text', '')
+                || getPath(order, 'leftBlock.textIcon.common.text.text', '');
+            const deliveryStatus = normalizeStatus(statusText);
+            // Дата заказа (B2b, PRIMARY fallback): парсим только из statusText
+            // («Получен 6 июля»). Для «В пути»/«Отменён»/«Собирается» statusText
+            // даты не содержит — подключаем fallback из текстовых полей leftBlock.
+            let date = parseRussianDate(statusText);
+            // Маркер для обёртки: дата восстановлена из leftBlock (не из statusText) —
+            // обёртка логирует это диагностическим полем JSON.date (как в старом коде).
+            let _dateFromLeftBlock = false;
+            if (!date) {
+                // Fallback из JSON orderlist (B2b): парсим parseRussianDate по текстовым
+                // полям leftBlock КРОМЕ subtitle (subtitle занят датой доставки).
+                const leftDateCandidates = [
+                    getPath(order, 'leftBlock.title.common.text', '') || getPath(order, 'leftBlock.title.text', ''),
+                    getPath(order, 'leftBlock.common.text', ''),
+                    getPath(order, 'leftBlock.textIcon.common.text.text', '') || getPath(order, 'leftBlock.textIcon.text.text', ''),
+                ].filter(Boolean);
+                for (const cand of leftDateCandidates) {
+                    date = parseRussianDate(cand);
+                    if (date) {
+                        _dateFromLeftBlock = true;
+                        break;
+                    }
+                }
+            }
+
+            // --- АДРЕС ПВЗ ---
+            // ЕДИНСТВЕННЫЙ источник адреса на orderlist — leftBlock.title.text
+            // (субтитл «Доставка в пункт выдачи» — НЕ адрес, не кандидат; см. Фазу D).
+            // Если title нет — адрес восстановится из orderdetails (detailsAddress, fetch.js),
+            // → B2 помечает это N/A (не FAIL), т.к. адрес не потерян, а перенесён в другой источник.
+            const titleText = getPath(order, 'leftBlock.title.text', '');
+            let pickupPoint = '';
+            if (!/^доставк/i.test(titleText) && !/^пункт\s+выдачи/i.test(titleText)) {
+                pickupPoint = titleText.replace(/^Пункт\s+Ozon[:\s]*/i, '').trim();
+            }
+
+            // --- ДАТА/ВРЕМЯ ВЫДАЧИ ---
+            const subtitleText = getPath(order, 'leftBlock.subtitle.text', '');
+            // 1) окно доставки (subtitle) → 2) старая схема (title) →
+            // 3) «Получен 30 июля» → фактическая дата получения (для доставленных OK, не N/A)
+            let cardDeliveryDate = parseDeliveryDate(subtitleText)
+                || parseDeliveryDate(titleText)
+                || parseRussianDate(statusText);
+            // 4) shipmentWidgets header («Ожидаемая дата: с 21 до 27 августа») —
+            //    обрабатывается в A3 (enrichOrdersWithProducts), здесь не дублировать
+
+            // --- ТОВАРЫ (с фото, ценой, статусом оплаты) ---
+            let items = [];
+            const products = getPath(order, 'rightBlock.products.products', []);
+            if (Array.isArray(products)) {
+                items = products.map((p, pi) => {
+                    // Фото: несколько возможных путей внутри продукта orderlist
+                    const picture = getPath(p, 'image.productMedia.image.url', '')
+                        || getPath(p, 'picture.image.image', '')
+                        || getPath(p, 'image.url', '')
+                        || '';
+                    // Цена
+                    let price = '';
+                    try {
+                        price = parsePrice(getPath(p, 'price.price[0].text', '') || getPath(p, 'price[0].text', ''));
+                    } catch(e) {
+                        price = '';
+                    }
+                    // Статус оплаты товара
+                    const itemPayment = extractProductPaymentStatus(p)
+                        || extractPaymentStatusFromAny(p)
+                        || '';
+                    // Количество
+                    let qty = '1';
+                    try {
+                        const rawQty = getPath(p, 'addToCartButton.action.quantity', null);
+                        if (rawQty != null) {
+                            const n = parseInt(rawQty, 10);
+                            if (!isNaN(n) && n > 0) qty = String(n);
+                        }
+                    } catch(e) {}
+                    return {
+                        name: getPath(p, 'title.name.text', ''),
+                        price,
+                        qty,
+                        shipmentStatus: deliveryStatus,
+                        deliveryDate: cardDeliveryDate,
+                        paymentStatus: itemPayment,
+                        picture
+                    };
+                }).filter(it => it.picture || it.name || it.price);
+            }
+
+            // --- СУММА fallback (из cellList → «К оплате при получении») ---
+            let fallbackAmount = '';
+            // 1) Старая схема: leftBlock.cellList.cells → price (оставить каскадом, приоритет выше)
+            const cells = getPath(order, 'leftBlock.cellList.cells', []);
+            if (Array.isArray(cells) && cells.length > 0) {
+                let total = 0;
+                cells.forEach(c => {
+                    const t = getPath(c, 'dsCell.rightBlock.price.price[0].text', '')
+                        || getPath(c, 'rightBlock.price.price[0].text', '');
+                    if (t.includes('₽')) total += parseFloat(parsePrice(t).replace(',', '.')) || 0;
+                });
+                if (total > 0) fallbackAmount = formatAmount(total);
+            }
+            // 2) НОВОЕ: сумма price.price[0].text по товарам rightBlock.products.products
+            //    (cellList удалён из новой схемы Ozon). Только запасной источник.
+            if (!fallbackAmount && Array.isArray(products) && products.length > 0) {
+                let total = 0;
+                products.forEach(p => {
+                    const t = getPath(p, 'price.price[0].text', '');
+                    if (t.includes('₽')) total += parseFloat(parsePrice(t).replace(',', '.')) || 0;
+                });
+                if (total > 0) fallbackAmount = formatAmount(total);
+            }
+
+            // --- СТАТУС ОПЛАТЫ (order-level) ---
+            // Если все товары имеют одинаковый статус — используем как order-level.
+            // При смешанных (есть «Не оплачен») — не угадываем, оставляем пустым.
+            let paymentStatus = '';
+            const paySet = new Set();
+            items.forEach(it => { if (it.paymentStatus) paySet.add(it.paymentStatus); });
+            if (paySet.size === 1) {
+                paymentStatus = [...paySet][0];
+            } else if (paySet.size === 0) {
+                // Пробуем badgeStatus.text напрямую (если extractProductPaymentStatus не сработал)
+                const badgeSet = new Set();
+                if (Array.isArray(products)) {
+                    products.forEach(p => {
+                        const bt = getPath(p, 'badgeStatus.text', '');
+                        if (bt) {
+                            const n = normalizePaymentStatus(bt);
+                            if (n) badgeSet.add(n);
+                        }
+                    });
+                }
+                if (badgeSet.size > 0) paymentStatus = pickBestPaymentStatus(badgeSet);
+            }
+
+            // Fallback 3: статус оплаты из cellList (orderlist JSON).
+            // cellList.cells[].dsCell.centerBlock.title.text содержит
+            // «К оплате при получении» / «Оплачено» / «Не оплачен» и т.п.
+            // Это order-level статус оплаты, видимый на карточке заказа.
+            if (!paymentStatus) {
+                const cellPaySet = new Set();
+                if (Array.isArray(cells)) {
+                    cells.forEach(c => {
+                        const cellTitle = getPath(c, 'dsCell.centerBlock.title.text', '')
+                            || getPath(c, 'centerBlock.title.text', '');
+                        if (cellTitle) {
+                            const n = normalizePaymentStatus(cellTitle);
+                            if (n) cellPaySet.add(n);
+                        }
+                    });
+                }
+                if (cellPaySet.size > 0) {
+                    paymentStatus = pickBestPaymentStatus(cellPaySet);
+                }
+            }
+
+            // --- УСЛОВИЯ N/A (B2) — вычисляются ДО возврата заказа ---
+            // pickupPoint: leftBlock.title отсутствует И subtitle = «Доставка в пункт выдачи».
+            // Адрес не потерян — восстановится из orderdetails (detailsAddress) на этапе enrich.
+            // Если fetch orderdetails упадёт — enrich добавит диагностическую запись (FAIL).
+            // Реальный subtitle — «Доставка в пункт выдачи» (буква «а» после «доставк»,
+            // поэтому [а-яё]* вместо \s+). Фиксирует N/A для новой схемы Ozon.
+            if (!pickupPoint && /^доставк[а-яё]*\s+в\s+пункт\s+выдачи/i.test(subtitleText)) {
+                _na.push('pickupPoint');
+            }
+            // paymentStatus: заказ доставлен И хотя бы один источник оплаты существует
+            // (badgeStatus / picture.badge / label / cellList), но статус не распознан.
+            // Если в заказе НЕТ НИ ОДНОГО источника оплаты — это FAIL (поломка схемы), не N/A.
+            const isDelivered = /доставлен|получен/i.test(deliveryStatus);
+            if (isDelivered && !paymentStatus) {
+                let hasPaySource = false;
+                if (Array.isArray(products)) {
+                    for (const p of products) {
+                        if (getPath(p, 'badgeStatus.text', '')
+                            || getPath(p, 'picture.badge', '')
+                            || getPath(p, 'picture.label', '')
+                            || getPath(p, 'badge', '')
+                            || getPath(p, 'label', '')) {
+                            hasPaySource = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasPaySource && Array.isArray(cells)) {
+                    for (const c of cells) {
+                        if (getPath(c, 'dsCell.centerBlock.title.text', '')
+                            || getPath(c, 'centerBlock.title.text', '')) {
+                            hasPaySource = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasPaySource) _na.push('paymentStatus');
+            }
+            // cardDeliveryDate / fallbackAmount — N/A не ставятся:
+            //   cardDeliveryDate — у доставленных OK из statusText, у «В пути» — окно доставки;
+            //   fallbackAmount — всегда FAIL при отсутствии (сигнал, что сумма не извлекается).
+
+            // --- ПЕРЕНОС per-product СТАТУСОВ ОПЛАТЫ (C1: jsonPayment в JSON-first) ---
+            // Источник статуса — items[].paymentStatus = extractProductPaymentStatus(p)
+            // → extractPaymentStatusFromAny(p) → badgeStatus fallback.
+            const jsonPayment = items.map((it, pi) => ({
+                productIdx: pi,
+                status: it.paymentStatus,
+                price: it.price
+            })).filter(jp => jp.status);
+
+            return {
+                orderNumber,
+                date,
+                deliveryStatus,
+                items,
+                paymentStatus,
+                fallbackAmount,
+                pickupPoint,
+                cardDeliveryDate,
+                jsonPayment: jsonPayment.length ? jsonPayment : undefined,
+                _dateFromLeftBlock,
+                _statusText: statusText,
+                _na,
+                _source: 'json'
+            };
+        }).filter(Boolean);
+
+        return orders;
+    }
+
+    // Тонкая DOM-обёртка: читает state-orderList из document, парсит JSON
+    // и делегирует чистое ядро parseOrdersV2JSON. Диагностика полей (logParseResult)
+    // выполняется ЗДЕСЬ — у обёртки есть доступ к order._na, поэтому notApplicable
+    // подставляется правильно (поля N/A не маскируют реальные поломки).
     function parseOrdersFromStateJSON() {
         try {
             const stateEl = document.querySelector('[id*="state-orderList"]');
@@ -1759,233 +2072,39 @@
             // Снимок полного JSON orderList (один раз на всю страницу)
             Diagnostics.snapshotRawData('[orderList]', null, raw, null);
 
-            const orders = ordersArr.map((order, oi) => {
-                const leftBlock = order?.leftBlock || {};
-                const rightBlock = order?.rightBlock || {};
+            const orders = parseOrdersV2JSON(ordersArr);
 
-                // --- НОМЕР ЗАКАЗА из action.link ---
-                // link приходит с экранированными слешами; после JSON.parse это обычная строка.
-                // Поддерживаем два формата action:
-                //   1) BEHAVIOR_TYPE_REDIRECT — обычная ссылка с ?order=XXXXXXXX
-                //   2) BEHAVIOR_TYPE_COMPOSER_ACTION — составной/мульти-заказ, ссылка вида
-                //      v2/cacheOrderProducts?data=eyJwb3N0aW5ncyI6WyI1ODk1NzY0OS0wNTgzLTEi...
-                //      где data — base64 от JSON {"postings":["XXXXXXXX-NNN-1","XXXXXXXX-NNN-2",...]}.
-                //      Номер заказа — общий префикс до первого дефиса-сегмента отправления.
-                let orderNumber = '';
-                const linkCandidates = [
-                    leftBlock?.common?.action?.link,
-                    leftBlock?.textIcon?.common?.action?.link,
-                    leftBlock?.title?.common?.action?.link,
-                    rightBlock?.products?.common?.action?.link,
-                ].filter(Boolean);
-                for (const lnk of linkCandidates) {
-                    const s = String(lnk);
-                    // Путь 1: обычная редирект-ссылка с ?order=
-                    const mm = s.match(/order=(\d+(?:-?\d+)?)/);
-                    if (mm) { orderNumber = mm[1]; break; }
-                    // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
-                    // Чистая логика вынесена в extractComposerAction (тестируется в F3).
-                    const composerNumber = extractComposerAction(s);
-                    if (composerNumber) { orderNumber = composerNumber; break; }
-                    if (/[?&]data=/.test(s)) {
-                        // Диагностика: data-параметр был, но номер не извлечён (битый base64/JSON)
-                        Diagnostics.logError('', `parseOrdersFromStateJSON.composerAction#${oi}`,
-                            s.slice(0, 300), new Error('extractComposerAction → null (битый base64/JSON)'));
-                    }
+            // Диагностика: логируем результат извлечения полей из JSON по одному
+            // разу на заказ (поля сохранены как раньше). notApplicable берётся из
+            // order._na (вычислен чистым ядром, см. B2).
+            orders.forEach(order => {
+                const na = order._na || [];
+                // Дата заказа: как в старом коде — JSON.date логируется только когда
+                // дата восстановлена из leftBlock-fallback (OK) или не найдена вовсе (FAIL).
+                // Из statusText дата считается primary-источником и не логируется.
+                if (order._dateFromLeftBlock) {
+                    Diagnostics.logParseResult(order.orderNumber, 'JSON.date',
+                        'fallback: leftBlock (title/common/textIcon) → parseRussianDate', order.date);
+                } else if (!order.date) {
+                    Diagnostics.logParseResult(order.orderNumber, 'JSON.date',
+                        'parseRussianDate(statusText + leftBlock) → empty',
+                        'дата заказа не определена (statusText: ' + (order._statusText || '') + ')');
                 }
-
-                if (!orderNumber) {
-                    Diagnostics.logError('', `parseOrdersFromStateJSON.orderNumber#${oi}`,
-                        JSON.stringify(order).slice(0, 500), 'orderNumber not found in JSON order');
-                    return null;
-                }
-
-                // --- СТАТУС ---
-                const statusText = leftBlock?.textIcon?.text?.text
-                    || leftBlock?.textIcon?.common?.text?.text || '';
-                const deliveryStatus = normalizeStatus(statusText);
-                // Дата заказа (B2b, PRIMARY fallback): парсим только из statusText
-                // («Получен 6 июля»). Для «В пути»/«Отменён»/«Собирается» statusText
-                // даты не содержит — подключаем fallback из текстовых полей leftBlock.
-                let date = parseRussianDate(statusText);
-                if (!date) {
-                    // Fallback из JSON orderlist (B2b): парсим parseRussianDate по текстовым
-                    // полям leftBlock КРОМЕ subtitle (subtitle занят датой доставки).
-                    const leftDateCandidates = [
-                        leftBlock?.title?.common?.text || leftBlock?.title?.text || '',
-                        leftBlock?.common?.text || '',
-                        leftBlock?.textIcon?.common?.text?.text || leftBlock?.textIcon?.text?.text || '',
-                    ].filter(Boolean);
-                    for (const cand of leftDateCandidates) {
-                        date = parseRussianDate(cand);
-                        if (date) {
-                            // Диагностика: дата заказа восстановлена из leftBlock (не из statusText)
-                            Diagnostics.logParseResult(orderNumber, 'JSON.date', 'fallback: leftBlock (title/common/textIcon) → parseRussianDate', date);
-                            break;
-                        }
-                    }
-                }
-                if (!date) {
-                    // Диагностика: дата заказа не найдена ни в statusText, ни в leftBlock —
-                    // фиксируем в Diagnostics (B2b: для каждого заказа дата ИЛИ лог).
-                    Diagnostics.logParseResult(orderNumber, 'JSON.date', 'parseRussianDate(statusText + leftBlock) → empty', 'дата заказа не определена (statusText: ' + statusText + ')');
-                }
-
-                // --- АДРЕС ПВЗ ---
-                const titleText = leftBlock?.title?.text || '';
-                let pickupPoint = titleText.replace(/^Пункт\s+Ozon[:\s]*/i, '').trim();
-                // "Доставка в пункт выдачи" — это не адрес, очищаем (подтянется из orderdetails)
-                if (/^доставк/i.test(pickupPoint)) {
-                    pickupPoint = '';
-                }
-
-                // --- ДАТА/ВРЕМЯ ВЫДАЧИ ---
-                const subtitleText = leftBlock?.subtitle?.text || '';
-                let cardDeliveryDate = parseDeliveryDate(subtitleText)
-                    || parseDeliveryDate(titleText)
-                    || parseDeliveryDate(statusText);
-
-                // --- ТОВАРЫ (с фото, ценой, статусом оплаты) ---
-                let items = [];
-                const products = rightBlock?.products?.products;
-                if (Array.isArray(products)) {
-                    items = products.map((p, pi) => {
-                        // Фото: несколько возможных путей внутри продукта orderlist
-                        const picture = p?.image?.productMedia?.image?.url
-                            || p?.picture?.image?.image
-                            || p?.image?.url
-                            || '';
-                        // Цена
-                        let price = '';
-                        try {
-                            price = parsePrice(p?.price?.price?.[0]?.text || p?.price?.[0]?.text || '');
-                        } catch(e) {
-                            Diagnostics.logParseResult(orderNumber, `JSON.product#${pi}.price`,
-                                'p.price.price[0].text', JSON.stringify(p?.price || {}).slice(0, 200));
-                        }
-                        // Статус оплаты товара
-                        const itemPayment = extractProductPaymentStatus(p)
-                            || extractPaymentStatusFromAny(p)
-                            || '';
-                        // Количество
-                        let qty = '1';
-                        try {
-                            const rawQty = p?.addToCartButton?.action?.quantity;
-                            if (rawQty != null) {
-                                const n = parseInt(rawQty, 10);
-                                if (!isNaN(n) && n > 0) qty = String(n);
-                            }
-                        } catch(e) {}
-                        return {
-                            name: p?.title?.name?.text || '',
-                            price,
-                            qty,
-                            shipmentStatus: deliveryStatus,
-                            deliveryDate: cardDeliveryDate,
-                            paymentStatus: itemPayment,
-                            picture
-                        };
-                    }).filter(it => it.picture || it.name || it.price);
-                }
-
-                // --- СУММА fallback (из cellList → «К оплате при получении») ---
-                let fallbackAmount = '';
-                try {
-                    const cells = leftBlock?.cellList?.cells;
-                    if (Array.isArray(cells)) {
-                        let total = 0;
-                        cells.forEach(c => {
-                            const t = c?.dsCell?.rightBlock?.price?.price?.[0]?.text
-                                || c?.rightBlock?.price?.price?.[0]?.text || '';
-                            if (t.includes('₽')) total += parseFloat(parsePrice(t)) || 0;
-                        });
-                        if (total > 0) {
-                            fallbackAmount = total % 1 === 0
-                                ? String(total)
-                                : total.toFixed(2).replace('.', ',');
-                        }
-                    }
-                } catch(e) {
-                    Diagnostics.logError(orderNumber, 'parseOrdersFromStateJSON.fallbackAmount', '', e);
-                }
-
-                // --- СТАТУС ОПЛАТЫ (order-level) ---
-                // Если все товары имеют одинаковый статус — используем как order-level.
-                // При смешанных (есть «Не оплачен») — не угадываем, оставляем пустым.
-                let paymentStatus = '';
-                const paySet = new Set();
-                items.forEach(it => { if (it.paymentStatus) paySet.add(it.paymentStatus); });
-                if (paySet.size === 1) {
-                    paymentStatus = [...paySet][0];
-                } else if (paySet.size === 0) {
-                    // Пробуем badgeStatus.text напрямую (если extractProductPaymentStatus не сработал)
-                    const badgeSet = new Set();
-                    if (Array.isArray(products)) {
-                        products.forEach(p => {
-                            const bt = p?.badgeStatus?.text;
-                            if (bt) {
-                                const n = normalizePaymentStatus(bt);
-                                if (n) badgeSet.add(n);
-                            }
-                        });
-                    }
-                    if (badgeSet.size > 0) paymentStatus = pickBestPaymentStatus(badgeSet);
-                }
-
-                // Fallback 3: статус оплаты из cellList (orderlist JSON).
-                // cellList.cells[].dsCell.centerBlock.title.text содержит
-                // «К оплате при получении» / «Оплачено» / «Не оплачен» и т.п.
-                // Это order-level статус оплаты, видимый на карточке заказа.
-                if (!paymentStatus) {
-                    try {
-                        const cells = leftBlock?.cellList?.cells;
-                        if (Array.isArray(cells)) {
-                            const cellPaySet = new Set();
-                            cells.forEach(c => {
-                                const titleText = c?.dsCell?.centerBlock?.title?.text
-                                    || c?.centerBlock?.title?.text || '';
-                                if (titleText) {
-                                    const n = normalizePaymentStatus(titleText);
-                                    if (n) cellPaySet.add(n);
-                                }
-                            });
-                            if (cellPaySet.size > 0) {
-                                paymentStatus = pickBestPaymentStatus(cellPaySet);
-                            }
-                        }
-                    } catch(e) {
-                        Diagnostics.logError(orderNumber, 'parseOrdersFromStateJSON.cellListPayment', '', e);
-                    }
-                }
-
-                // Диагностика: логируем результат извлечения полей из JSON
-                Diagnostics.logParseResult(orderNumber, 'JSON.orderNumber',
-                    'leftBlock.common.action.link → /order=/', orderNumber);
-                Diagnostics.logParseResult(orderNumber, 'JSON.deliveryStatus',
-                    'leftBlock.textIcon.text.text → normalizeStatus', deliveryStatus);
-                Diagnostics.logParseResult(orderNumber, 'JSON.pickupPoint',
-                    'leftBlock.title.text', pickupPoint);
-                Diagnostics.logParseResult(orderNumber, 'JSON.cardDeliveryDate',
-                    'leftBlock.subtitle.text → parseDeliveryDate', cardDeliveryDate);
-                Diagnostics.logParseResult(orderNumber, 'JSON.itemsCount',
-                    'rightBlock.products.products', String(items.length));
-                Diagnostics.logParseResult(orderNumber, 'JSON.fallbackAmount',
-                    'cellList.cells → price', fallbackAmount);
-                Diagnostics.logParseResult(orderNumber, 'JSON.paymentStatus',
-                    'items / badgeStatus → normalizePaymentStatus', paymentStatus);
-
-                return {
-                    orderNumber,
-                    date,
-                    deliveryStatus,
-                    items,
-                    paymentStatus,
-                    fallbackAmount,
-                    pickupPoint,
-                    cardDeliveryDate,
-                    _source: 'json'
-                };
-            }).filter(Boolean);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.orderNumber',
+                    'leftBlock.common.action.link → /order=/', order.orderNumber);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.deliveryStatus',
+                    'leftBlock.textIcon.text.text → normalizeStatus', order.deliveryStatus);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.pickupPoint',
+                    'leftBlock.title.text', order.pickupPoint, na.includes('pickupPoint'));
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.cardDeliveryDate',
+                    'leftBlock.subtitle.text → parseDeliveryDate', order.cardDeliveryDate);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.itemsCount',
+                    'rightBlock.products.products', String(order.items.length));
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.fallbackAmount',
+                    'cellList.cells → price | products[].price', order.fallbackAmount);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.paymentStatus',
+                    'items / badgeStatus → normalizePaymentStatus', order.paymentStatus, na.includes('paymentStatus'));
+            });
 
             console.log(`[Ozon Copier] JSON-first: извлечено ${orders.length} заказов из state-orderList`);
             return orders;
@@ -2098,7 +2217,8 @@
 //   pickBestPaymentStatus, parseDeliveryDate, parseRussianDate,
 //   formatDateParts, MONTHS_RU_NAMES, parsePrice, extractProductPaymentStatus,
 //   extractPaymentStatusFromAny, mergePaymentStatus.
-// Объявляет: fetchOrderDetailsOnce, fetchOrderDetails, enrichOrdersWithProducts.
+// Объявляет: extractAddressFromDoc, fetchOrderDetailsOnce, fetchOrderDetails,
+//   enrichOrdersWithProducts.
 // ============================================================
     // ============================================================
     // 7. ПОДГРУЗКА ТОВАРОВ С ЦЕНАМИ ИЗ /my/orderdetails/
@@ -2304,119 +2424,11 @@
                 }
             });
 
-            // Извлекаем адрес пункта выдачи со страницы orderdetails.
-            // Каскад селекторов: Ozon периодически меняет хэш-префикс (b35_5_1 → b35_5_2 → ...),
-            // поэтому сначала пробуем точные хэши, затем структурный fallback по контексту блока.
+            // Извлекаем адрес пункта выдачи со страницы orderdetails (чистый каскад, см. E5)
             let detailsAddress = '';
             try {
-                // 1) Точные селекторы для известных версий разметки (от новых к старым)
-                const _addrHashSelectors = [
-                    '.b35_5_3-b4.tsBody400Small',   // актуальная разметка (июль 2026)
-                    '.b35_5_2-b4.tsBody400Small',   // предыдущая разметка
-                    '.b35_5_1-b4.tsBody400Small',   // более старая разметка
-                ];
-                let addrEl = null;
-                for (const sel of _addrHashSelectors) {
-                    addrEl = doc.querySelector(sel);
-                    if (addrEl) break;
-                }
-                // 2) Структурный fallback: span внутри блока доставки [class*="b35"],
-                //    чей текст начинается с «Пункт Ozon,» (полный адрес, а не лейбл «Пункт Ozon •»).
-                //    Устойчив к любой смене хэша b35_5_X.
-                if (!addrEl) {
-                    const _candidates = doc.querySelectorAll('[class*="b35"] span');
-                    for (const el of _candidates) {
-                        const t = (el.textContent || '').trim();
-                        // Матчит "Пункт Ozon, ..." и "Пункт выдачи крупногабаритных товаров Ozon, ..."
-                        if (/^Пункт\s+(Ozon|выдачи)\s*,?\s*.+/i.test(t)) { addrEl = el; break; }
-                    }
-                }
-                // Более полный адрес: "Пункт Ozon, Россия, Ростовская, ..., 30"
-                if (addrEl) {
-                    const fullText = (addrEl.textContent || '').trim();
-                    // Извлекаем после "Пункт Ozon, " — полный адрес
-                    const m = fullText.match(/Пункт\s+Ozon[,\s]+(.+)/i);
-                    detailsAddress = m ? m[1].trim() : fullText.replace(/^(Пункт\s+Ozon[,\s]*)/i, '');
-                }
-                if (!detailsAddress) {
-                    // 3) Последний шанс — тот же подход что и на orderlist: .tsCompactControl500Medium
-                    const altEl = doc.querySelector('.tsCompactControl500Medium');
-                    if (altEl && /пункт/i.test(altEl.textContent || '')) {
-                        detailsAddress = (altEl.textContent || '').trim().replace(/^(Пункт Ozon[:\s]*)/i, '');
-                    }
-                }
-                // Диагностика: логируем результат извлечения адреса
-                Diagnostics.logParseResult(orderNumber, 'detailsAddress',
-                    'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → .tsCompactControl500Medium',
-                    detailsAddress);
-
-                // Диагностика: пробы DOM-селекторов для detailsAddress на orderdetails.
-                // Пробуем те же и дополнительные селекторы на doc (DOM страницы orderdetails).
-                const _addrProbes = [];
-                const _addrSelectors = [
-                    '.b35_5_3-b4.tsBody400Small',
-                    '.b35_5_2-b4.tsBody400Small',
-                    '.b35_5_1-b4.tsBody400Small',
-                    '.b35_5_3-b4',
-                    '.b35_5_2-b4',
-                    '.b35_5_1-b4',
-                    '.tsCompactControl500Medium',
-                    '.tsBody400Small',
-                    '.tsBody500Medium',
-                    '.tsCompactControl400Small',
-                    '[class*="pickup"]',
-                    '[class*="address"]',
-                    '[class*="point"]',
-                    '[class*="b35"]'
-                ];
-                _addrSelectors.forEach(sel => {
-                    try {
-                        const els = doc.querySelectorAll(sel);
-                        els.forEach((el, i) => {
-                            if (i >= 8) return;
-                            const txt = (el.textContent || '').trim().slice(0, 300);
-                            const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-                            _addrProbes.push({
-                                selector: sel,
-                                found: true,
-                                count: els.length,
-                                text: txt,
-                                className: cls,
-                                tagName: el.tagName,
-                                outerHTML: (el.outerHTML || '').slice(0, 400)
-                            });
-                        });
-                        if (els.length === 0) {
-                            _addrProbes.push({ selector: sel, found: false, count: 0, text: '', className: '', tagName: '', outerHTML: '' });
-                        }
-                    } catch(e) {
-                        _addrProbes.push({ selector: sel, found: false, count: 0, text: `ERROR: ${e.message}`, className: '', tagName: '', outerHTML: '' });
-                    }
-                });
-                // Поиск всех элементов с «пункт» / «пвз» / «выдач» на странице orderdetails
-                try {
-                    const _allEls = doc.querySelectorAll('*');
-                    const _punktEls = [];
-                    _allEls.forEach(el => {
-                        const t = (el.textContent || '').trim();
-                        if (t.length > 0 && t.length < 200 && /пункт|пвз|выдач|адрес/i.test(t)) {
-                            _punktEls.push(el);
-                        }
-                    });
-                    _punktEls.slice(0, 12).forEach(el => {
-                        const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-                        _addrProbes.push({
-                            selector: '(text contains пункт/пвз/выдач/адрес)',
-                            found: true,
-                            count: _punktEls.length,
-                            text: (el.textContent || '').trim().slice(0, 300),
-                            className: cls,
-                            tagName: el.tagName,
-                            outerHTML: (el.outerHTML || '').slice(0, 400)
-                        });
-                    });
-                } catch(e) {}
-                Diagnostics.logDomProbe(orderNumber, 'orderdetails', 'document', _addrProbes);
+                const extracted = extractAddressFromDoc(doc, orderNumber);
+                detailsAddress = extracted.address;
             } catch(e) {
                 Diagnostics.logError(orderNumber, 'fetchOrderDetails.detailsAddress', '', e);
             }
@@ -2487,12 +2499,137 @@
                 Diagnostics.logError(orderNumber, 'fetchOrderDetails.orderDate', '', e);
             }
 
-            return { items: allItems, address: detailsAddress, orderDate };
+            return { items: allItems, address: detailsAddress, orderDate, deliveryDate };
         } catch(e) {
             // AbortError не повторяем — отмена по сигналу вышестоящего кода
             if (e.name === 'AbortError') return { items: [], address: '' };
             // Пробрасываем ошибку в обёртку fetchOrderDetails для retry
             throw e;
+        }
+    }
+
+    // Извлечение адреса пункта выдачи со страницы orderdetails.
+    // Чистая по doc: работает с уже распарсенным document (querySelector/querySelectorAll).
+    // Возвращает { address, probes } (probes — массив DOM-проб).
+    // Каскад селекторов: Ozon периодически меняет хэш-префикс (b35_5_1 → b35_5_2 → ...),
+    // поэтому сначала пробуем точные хэши, затем структурный fallback по контексту блока.
+    // Диагностика logParseResult/detailsAddress + logDomProbe — здесь (как было в
+    // fetchOrderDetailsOnce); Diagnostics безопасен при enabled=false.
+    function extractAddressFromDoc(doc, orderNumber) {
+        let detailsAddress = '';
+        try {
+            // 1) Точные селекторы для известных версий разметки (от новых к старым)
+            const _addrHashSelectors = [
+                '.b35_5_3-b4.tsBody400Small',   // актуальная разметка (июль 2026)
+                '.b35_5_2-b4.tsBody400Small',   // предыдущая разметка
+                '.b35_5_1-b4.tsBody400Small',   // более старая разметка
+            ];
+            let addrEl = null;
+            for (const sel of _addrHashSelectors) {
+                addrEl = doc.querySelector(sel);
+                if (addrEl) break;
+            }
+            // 2) Структурный fallback: span внутри блока доставки [class*="b35"],
+            //    чей текст начинается с «Пункт Ozon,» (полный адрес, а не лейбл «Пункт Ozon •»).
+            //    Устойчив к любой смене хэша b35_5_X.
+            if (!addrEl) {
+                const _candidates = doc.querySelectorAll('[class*="b35"] span');
+                for (const el of _candidates) {
+                    const t = (el.textContent || '').trim();
+                    // Матчит "Пункт Ozon, ..." и "Пункт выдачи крупногабаритных товаров Ozon, ..."
+                    if (/^Пункт\s+(Ozon|выдачи)\s*,?\s*.+/i.test(t)) { addrEl = el; break; }
+                }
+            }
+            // Более полный адрес: "Пункт Ozon, Россия, Ростовская, ..., 30"
+            if (addrEl) {
+                const fullText = (addrEl.textContent || '').trim();
+                // Извлекаем после "Пункт Ozon, " — полный адрес
+                const m = fullText.match(/Пункт\s+Ozon[,\s]+(.+)/i);
+                detailsAddress = m ? m[1].trim() : fullText.replace(/^(Пункт\s+Ozon[,\s]*)/i, '');
+            }
+            if (!detailsAddress) {
+                // 3) Последний шанс — тот же подход что и на orderlist: .tsCompactControl500Medium
+                const altEl = doc.querySelector('.tsCompactControl500Medium');
+                if (altEl && /пункт/i.test(altEl.textContent || '')) {
+                    detailsAddress = (altEl.textContent || '').trim().replace(/^(Пункт Ozon[:\s]*)/i, '');
+                }
+            }
+            // Диагностика: логируем результат извлечения адреса
+            Diagnostics.logParseResult(orderNumber, 'detailsAddress',
+                'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → .tsCompactControl500Medium',
+                detailsAddress);
+
+            // Диагностика: пробы DOM-селекторов для detailsAddress на orderdetails.
+            // Пробуем те же и дополнительные селекторы на doc (DOM страницы orderdetails).
+            const _addrProbes = [];
+            const _addrSelectors = [
+                '.b35_5_3-b4.tsBody400Small',
+                '.b35_5_2-b4.tsBody400Small',
+                '.b35_5_1-b4.tsBody400Small',
+                '.b35_5_3-b4',
+                '.b35_5_2-b4',
+                '.b35_5_1-b4',
+                '.tsCompactControl500Medium',
+                '.tsBody400Small',
+                '.tsBody500Medium',
+                '.tsCompactControl400Small',
+                '[class*="pickup"]',
+                '[class*="address"]',
+                '[class*="point"]',
+                '[class*="b35"]'
+            ];
+            _addrSelectors.forEach(sel => {
+                try {
+                    const els = doc.querySelectorAll(sel);
+                    els.forEach((el, i) => {
+                        if (i >= 8) return;
+                        const txt = (el.textContent || '').trim().slice(0, 300);
+                        const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+                        _addrProbes.push({
+                            selector: sel,
+                            found: true,
+                            count: els.length,
+                            text: txt,
+                            className: cls,
+                            tagName: el.tagName,
+                            outerHTML: (el.outerHTML || '').slice(0, 400)
+                        });
+                    });
+                    if (els.length === 0) {
+                        _addrProbes.push({ selector: sel, found: false, count: 0, text: '', className: '', tagName: '', outerHTML: '' });
+                    }
+                } catch(e) {
+                    _addrProbes.push({ selector: sel, found: false, count: 0, text: `ERROR: ${e.message}`, className: '', tagName: '', outerHTML: '' });
+                }
+            });
+            // Поиск всех элементов с «пункт» / «пвз» / «выдач» на странице orderdetails
+            try {
+                const _allEls = doc.querySelectorAll('*');
+                const _punktEls = [];
+                _allEls.forEach(el => {
+                    const t = (el.textContent || '').trim();
+                    if (t.length > 0 && t.length < 200 && /пункт|пвз|выдач|адрес/i.test(t)) {
+                        _punktEls.push(el);
+                    }
+                });
+                _punktEls.slice(0, 12).forEach(el => {
+                    const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+                    _addrProbes.push({
+                        selector: '(text contains пункт/пвз/выдач/адрес)',
+                        found: true,
+                        count: _punktEls.length,
+                        text: (el.textContent || '').trim().slice(0, 300),
+                        className: cls,
+                        tagName: el.tagName,
+                        outerHTML: (el.outerHTML || '').slice(0, 400)
+                    });
+                });
+            } catch(e) {}
+            Diagnostics.logDomProbe(orderNumber, 'orderdetails', 'document', _addrProbes);
+            return { address: detailsAddress, probes: _addrProbes };
+        } catch(e) {
+            Diagnostics.logError(orderNumber, 'fetchOrderDetails.detailsAddress', '', e);
+            return { address: '', probes: [] };
         }
     }
 
@@ -2551,6 +2688,30 @@
                 // Запасной адрес пункта выдачи со страницы orderdetails
                 if (!order.pickupPoint && data.address) {
                     order.pickupPoint = data.address;
+                }
+                // B2: pickupPoint помечен N/A на этапе orderlist (title отсутствует,
+                // subtitle = «Доставка в пункт выдачи»), адрес должен был восстановиться
+                // из orderdetails (detailsAddress). Если fetch упал и адрес НЕ восстановлен —
+                // это реальная потеря адреса → FAIL, а не N/A (записываем в ошибки).
+                if ((order._na || []).includes('pickupPoint') && !order.pickupPoint) {
+                    Diagnostics.logError(order.orderNumber,
+                        'pickupPoint.N/A но detailsAddress не восстановлен',
+                        'orderlist: leftBlock.title отсутствует, subtitle=«Доставка в пункт выдачи»',
+                        'fetch orderdetails не дал адрес (data.address пуст или fetch упал)');
+                    // W-1: явная запись в diff со статусом FAIL (не N/A): реальная потеря адреса.
+                    // logError выше попадает в секцию «⚠️ Ошибки», но НЕ перезаписывает
+                    // запись parseResults из этапа orderlist (там остался 🟡 N/A).
+                    // Здесь перезаписываем: notApplicable=false → createParseResult даёт FAIL.
+                    if (Diagnostics.enabled) {
+                        Diagnostics.logParseResult(order.orderNumber, 'JSON.pickupPoint',
+                            'leftBlock.title.text (N/A→FAIL: fetch упал, адрес не восстановлен)',
+                            order.pickupPoint || '', false); // notApplicable=false → FAIL
+                    }
+                }
+                // A3: дата доставки из orderdetails → на уровень заказа (для экспорта/сводки),
+                // если на orderlist она пуста
+                if (!order.cardDeliveryDate && data.deliveryDate) {
+                    order.cardDeliveryDate = data.deliveryDate;
                 }
                 // B2b (SECONDARY): дата заказа из orderdetails, если primary-fallback не дал.
                 // Если и тут пусто — дата уже зафиксирована в Diagnostics (parseOrdersFromStateJSON).
@@ -2716,8 +2877,7 @@
         if (orders.length > 0) {
             tsv += '\n';
             tsv += ['', '', '', '', '', '', '', '', '', ''].join(sep) + '\n';
-            const grandTotalStr = isNaN(grandTotal) ? '' :
-                (grandTotal % 1 === 0 ? grandTotal.toString() : grandTotal.toFixed(2).replace('.', ','));
+            const grandTotalStr = isNaN(grandTotal) ? '' : formatAmount(grandTotal);
             tsv += ['ИТОГО:', orders.length + ' заказов, ' + totalRows + ' позиций', '', '', '', grandTotalStr, '', '', '', ''].join(sep) + '\n';
         }
 
@@ -3048,7 +3208,7 @@
 
         function orderTotalStr(val) {
             if (isNaN(val) || val === 0) return '—';
-            return val % 1 === 0 ? val.toString() : val.toFixed(2).replace('.', ',');
+            return formatAmount(val);
         }
 
         const grandTotalStr = orderTotalStr(grandTotal);
@@ -3658,6 +3818,12 @@
             dedupeOrders,
             fetchWithTimeout,
             fetchOrderDetails,
+            extractAddressFromDoc,
+            parseOrdersV2JSON,
+            formatAmount,
+            getPath,
+            createParseResult,
+            buildDiagnosticsMarkdown,
             detectImageType,
             extractComposerAction,
             buildXlsxWorkbook,

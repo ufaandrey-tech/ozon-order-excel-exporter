@@ -39,9 +39,11 @@ const {
     extractManifestVersion
 } = require('../build/build.js');
 
-// Ровно 17 чистых функций в гарде (совпадает с монолитом 3454–3478).
-test('build-integrity: гард экспортирует ровно 17 функций', () => {
-    assert.strictEqual(EXPORTS.length, 17, `ожидалось 17 экспортов, получено ${EXPORTS.length}`);
+// Ровно 23 чистых функций в гарде (17 базовых + Фаза E:
+// parseOrdersV2JSON, formatAmount, getPath, createParseResult,
+// buildDiagnosticsMarkdown, extractAddressFromDoc).
+test('build-integrity: гард экспортирует ровно 23 функции', () => {
+    assert.strictEqual(EXPORTS.length, 23, `ожидалось 23 экспорта, получено ${EXPORTS.length}`);
 });
 
 test('build-integrity: оба артефакта существуют в dist/ (после npm run build)', () => {
@@ -80,15 +82,15 @@ test('build-integrity: SCRIPT_VERSION едина во всех источник�
         'version в файле dist/extension/manifest.json не совпадает');
 });
 
-test('build-integrity: все 17 функций гарда присутствуют в обоих собранных файлах', () => {
+test('build-integrity: все 23 функции гарда присутствуют в обоих собранных файлах', () => {
     const userScript = require('../dist/ozon-orders-copier.user.js');
     const extension = require('../dist/extension/content.js');
 
-    // Наборы экспортов должны совпадать и быть ровно 17.
+    // Наборы экспортов должны совпадать и быть ровно EXPORTS.length.
     const keysU = Object.keys(userScript).sort();
     const keysE = Object.keys(extension).sort();
     assert.deepStrictEqual(keysU, keysE, 'наборы экспортов userscript и extension должны совпадать');
-    assert.strictEqual(keysU.length, EXPORTS.length, 'число экспортов должно быть 17');
+    assert.strictEqual(keysU.length, EXPORTS.length, 'число экспортов должно быть равно EXPORTS.length');
 
     for (const fn of EXPORTS) {
         assert.strictEqual(typeof userScript[fn], 'function',

@@ -123,7 +123,7 @@ python generate_template.py
 
 ```bash
 npm run build   # собирает оба артефакта: dist/ozon-orders-copier.user.js и dist/extension/
-npm test        # pretest автоматически собирает dist/, затем гоняет тесты (73/73)
+npm test        # pretest автоматически собирает dist/, затем гоняет тесты (100/100)
 ```
 
 ### Единое версионирование
@@ -177,9 +177,11 @@ npm test        # pretest автоматически собирает dist/, з�
 │   ├── lib/exceljs.min.js
 │   └── icons/
 ├── tests/                        # Автотесты (npm test)
-│   ├── build-integrity.test.js   #   Целостность сборки (гард 17 функций, версия, IIFE)
+│   ├── build-integrity.test.js   #   Целостность сборки (гард 23 функции, версия, IIFE)
 │   ├── unit.test.js
 │   ├── fetch-timeout.test.js
+│   ├── fetch-address.test.js     #   E5: каскад извлечения адреса ПВЗ (extractAddressFromDoc)
+│   ├── parse-json.test.js        #   E3/E4: чистое ядро parseOrdersV2JSON, getPath, диагностика
 │   └── xlsx-structure.test.js
 ├── generate_template.py          # Python-скрипт генерации Excel-шаблона
 ├── DEVTOLFS_INSTRUCTIONS.md      # Инструкция по отладке (для разработчиков)
@@ -188,7 +190,8 @@ npm test        # pretest автоматически собирает dist/, з�
 │   ├── v9.10.md
 │   ├── v9.12.md
 │   ├── v9.14.md
-│   └── v9.15.md
+│   ├── v9.15.md
+│   └── v9.16.md
 └── plans/                        # Внутренние планы разработки (не для пользователей)
 ```
 
@@ -200,7 +203,8 @@ npm test        # pretest автоматически собирает dist/, з�
 |---|---|---|
 | 1.1.1 | 9.14 | Предыдущий релиз |
 | 1.2.0 | 9.15 | Историческая альтернатива (не выпускалась, версия расширения синхронизирована в 9.15) |
-| **9.15** | **9.15** | **Текущий релиз — единая версия из `src/core/constants.js`** |
+| 9.15 | 9.15 | Предыдущий релиз — единая версия из `src/core/constants.js` |
+| **9.16** | **9.16** | **Текущий релиз — единая версия из `src/core/constants.js`** |
 
 ## 🔒 Приватность
 
@@ -218,9 +222,11 @@ npm test        # pretest автоматически собирает dist/, з�
 
 ## 🧪 Тесты
 
-- Автотесты **собранного кода** из `dist/`: `npm test` (Node ≥ 18, без внешних зависимостей) — **73/73 зелёных**
+- Автотесты **собранного кода** из `dist/`: `npm test` (Node ≥ 18, без внешних зависимостей) — **100/100 зелёных**
 - `pretest` автоматически собирает `dist/` перед прогоном — тесты всегда проверяют актуальный артефакт
-- [`tests/build-integrity.test.js`](tests/build-integrity.test.js) — целостность сборки: гард экспортирует ровно 17 функций, артефакты существуют в `dist/`, `SCRIPT_VERSION` едина во всех источниках, одинарная IIFE-обёртка
+- Парсинг JSON orderlist вынесен в **чистую функцию** [`parseOrdersV2JSON`](src/core/parse.js) (без DOM) — она тестируется на реальных схемах Ozon (старая + новая) в [`tests/parse-json.test.js`](tests/parse-json.test.js)
+- Диагностический отчёт **параметризован** — [`buildDiagnosticsMarkdown(env, deduped, state)`](src/core/diagnostics.js) получает состояние (errors/parseResults/…) параметром, что позволяет тестировать OK/FAIL/N/A и Markdown-рендер без браузера
+- [`tests/build-integrity.test.js`](tests/build-integrity.test.js) — целостность сборки: гард экспортирует ровно 23 функции, артефакты существуют в `dist/`, `SCRIPT_VERSION` едина во всех источниках, одинарная IIFE-обёртка
 - **Обязательный шаг перед каждым релизом** — релиз не выполняется без зелёного прогона
 
 ## 📝 Лицензия
@@ -229,4 +235,4 @@ npm test        # pretest автоматически собирает dist/, з�
 
 ---
 
-> **Версия:** 9.15 | **Обновлено:** 1 августа 2026
+> **Версия:** 9.16 | **Обновлено:** 3 августа 2026

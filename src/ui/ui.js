@@ -86,7 +86,7 @@
 
         function orderTotalStr(val) {
             if (isNaN(val) || val === 0) return '—';
-            return val % 1 === 0 ? val.toString() : val.toFixed(2).replace('.', ',');
+            return formatAmount(val);
         }
 
         const grandTotalStr = orderTotalStr(grandTotal);

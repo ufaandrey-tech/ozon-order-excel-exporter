@@ -13,7 +13,7 @@
 //   pickBestPaymentStatus, parsePrice, extractComposerAction,
 //   extractProductPaymentStatus, extractPaymentStatusFromAny.
 // Объявляет: parseOrder, extractPaymentFromOrderListJSON,
-//   parseOrdersFromStateJSON, parseOrders.
+//   parseOrdersV2JSON, parseOrdersFromStateJSON, parseOrders.
 // ============================================================
     // ============================================================
     // 5. ПАРСИНГ КАРТОЧКИ ЗАКАЗА
@@ -201,7 +201,7 @@
                 if (!isNaN(num)) total += num;
             });
             if (total > 0) {
-                fallbackAmount = total % 1 === 0 ? total.toString() : total.toFixed(2).replace('.', ',');
+                fallbackAmount = formatAmount(total);
             }
         }
         if (!fallbackAmount) {
@@ -210,7 +210,7 @@
                 const cleaned = amMatch[1].replace(/\s/g, '').replace(',', '.');
                 const num = parseFloat(cleaned);
                 if (!isNaN(num)) {
-                    fallbackAmount = num % 1 === 0 ? num.toString() : num.toFixed(2).replace('.', ',');
+                    fallbackAmount = formatAmount(num);
                 }
             }
         }
@@ -450,6 +450,285 @@
     // дату/время выдачи, товары с фото, цены, статусы оплаты.
     // Полные названия товаров и кол-во подтягиваются позже через
     // enrichOrdersWithProducts → fetchOrderDetails.
+
+    // ЧИСТОЕ ядро: массив ordersV2 → массив распарсенных заказов.
+    // НЕ читает document/DOM/window — только ordersArr и чистые функции.
+    // Все условия N/A (см. B2) вычисляются здесь и возвращаются на заказе
+    // массивом order._na = ['pickupPoint', 'paymentStatus', ...]
+    // (пустой/отсутствующий — N/A нет). Диагностика полей выполняется
+    // тонкой DOM-обёрткой parseOrdersFromStateJSON (у неё есть доступ к _na).
+    function parseOrdersV2JSON(ordersArr) {
+        if (!Array.isArray(ordersArr)) return [];
+
+        const orders = ordersArr.map((order, oi) => {
+            const leftBlock = order?.leftBlock || {};
+            const rightBlock = order?.rightBlock || {};
+            const _na = [];
+
+            // --- НОМЕР ЗАКАЗА из action.link ---
+            // link приходит с экранированными слешами; после JSON.parse это обычная строка.
+            // Поддерживаем два формата action:
+            //   1) BEHAVIOR_TYPE_REDIRECT — обычная ссылка с ?order=XXXXXXXX
+            //   2) BEHAVIOR_TYPE_COMPOSER_ACTION — составной/мульти-заказ, ссылка вида
+            //      v2/cacheOrderProducts?data=eyJwb3N0aW5ncyI6WyI1ODk1NzY0OS0wNTgzLTEi...
+            //      где data — base64 от JSON {"postings":["XXXXXXXX-NNN-1","XXXXXXXX-NNN-2",...]}.
+            //      Номер заказа — общий префикс до первого дефиса-сегмента отправления.
+            let orderNumber = '';
+            const linkCandidates = [
+                getPath(order, 'leftBlock.common.action.link', ''),
+                getPath(order, 'leftBlock.textIcon.common.action.link', ''),
+                getPath(order, 'leftBlock.title.common.action.link', ''),
+                getPath(order, 'rightBlock.products.common.action.link', ''),
+            ].filter(Boolean);
+            for (const lnk of linkCandidates) {
+                const s = String(lnk);
+                // Путь 1: обычная редирект-ссылка с ?order=
+                const mm = s.match(/order=(\d+(?:-?\d+)?)/);
+                if (mm) { orderNumber = mm[1]; break; }
+                // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
+                // Чистая логика вынесена в extractComposerAction (тестируется в F3).
+                const composerNumber = extractComposerAction(s);
+                if (composerNumber) { orderNumber = composerNumber; break; }
+            }
+
+            if (!orderNumber) {
+                return null;
+            }
+
+            // --- СТАТУС ---
+            const statusText = getPath(order, 'leftBlock.textIcon.text.text', '')
+                || getPath(order, 'leftBlock.textIcon.common.text.text', '');
+            const deliveryStatus = normalizeStatus(statusText);
+            // Дата заказа (B2b, PRIMARY fallback): парсим только из statusText
+            // («Получен 6 июля»). Для «В пути»/«Отменён»/«Собирается» statusText
+            // даты не содержит — подключаем fallback из текстовых полей leftBlock.
+            let date = parseRussianDate(statusText);
+            // Маркер для обёртки: дата восстановлена из leftBlock (не из statusText) —
+            // обёртка логирует это диагностическим полем JSON.date (как в старом коде).
+            let _dateFromLeftBlock = false;
+            if (!date) {
+                // Fallback из JSON orderlist (B2b): парсим parseRussianDate по текстовым
+                // полям leftBlock КРОМЕ subtitle (subtitle занят датой доставки).
+                const leftDateCandidates = [
+                    getPath(order, 'leftBlock.title.common.text', '') || getPath(order, 'leftBlock.title.text', ''),
+                    getPath(order, 'leftBlock.common.text', ''),
+                    getPath(order, 'leftBlock.textIcon.common.text.text', '') || getPath(order, 'leftBlock.textIcon.text.text', ''),
+                ].filter(Boolean);
+                for (const cand of leftDateCandidates) {
+                    date = parseRussianDate(cand);
+                    if (date) {
+                        _dateFromLeftBlock = true;
+                        break;
+                    }
+                }
+            }
+
+            // --- АДРЕС ПВЗ ---
+            // ЕДИНСТВЕННЫЙ источник адреса на orderlist — leftBlock.title.text
+            // (субтитл «Доставка в пункт выдачи» — НЕ адрес, не кандидат; см. Фазу D).
+            // Если title нет — адрес восстановится из orderdetails (detailsAddress, fetch.js),
+            // → B2 помечает это N/A (не FAIL), т.к. адрес не потерян, а перенесён в другой источник.
+            const titleText = getPath(order, 'leftBlock.title.text', '');
+            let pickupPoint = '';
+            if (!/^доставк/i.test(titleText) && !/^пункт\s+выдачи/i.test(titleText)) {
+                pickupPoint = titleText.replace(/^Пункт\s+Ozon[:\s]*/i, '').trim();
+            }
+
+            // --- ДАТА/ВРЕМЯ ВЫДАЧИ ---
+            const subtitleText = getPath(order, 'leftBlock.subtitle.text', '');
+            // 1) окно доставки (subtitle) → 2) старая схема (title) →
+            // 3) «Получен 30 июля» → фактическая дата получения (для доставленных OK, не N/A)
+            let cardDeliveryDate = parseDeliveryDate(subtitleText)
+                || parseDeliveryDate(titleText)
+                || parseRussianDate(statusText);
+            // 4) shipmentWidgets header («Ожидаемая дата: с 21 до 27 августа») —
+            //    обрабатывается в A3 (enrichOrdersWithProducts), здесь не дублировать
+
+            // --- ТОВАРЫ (с фото, ценой, статусом оплаты) ---
+            let items = [];
+            const products = getPath(order, 'rightBlock.products.products', []);
+            if (Array.isArray(products)) {
+                items = products.map((p, pi) => {
+                    // Фото: несколько возможных путей внутри продукта orderlist
+                    const picture = getPath(p, 'image.productMedia.image.url', '')
+                        || getPath(p, 'picture.image.image', '')
+                        || getPath(p, 'image.url', '')
+                        || '';
+                    // Цена
+                    let price = '';
+                    try {
+                        price = parsePrice(getPath(p, 'price.price[0].text', '') || getPath(p, 'price[0].text', ''));
+                    } catch(e) {
+                        price = '';
+                    }
+                    // Статус оплаты товара
+                    const itemPayment = extractProductPaymentStatus(p)
+                        || extractPaymentStatusFromAny(p)
+                        || '';
+                    // Количество
+                    let qty = '1';
+                    try {
+                        const rawQty = getPath(p, 'addToCartButton.action.quantity', null);
+                        if (rawQty != null) {
+                            const n = parseInt(rawQty, 10);
+                            if (!isNaN(n) && n > 0) qty = String(n);
+                        }
+                    } catch(e) {}
+                    return {
+                        name: getPath(p, 'title.name.text', ''),
+                        price,
+                        qty,
+                        shipmentStatus: deliveryStatus,
+                        deliveryDate: cardDeliveryDate,
+                        paymentStatus: itemPayment,
+                        picture
+                    };
+                }).filter(it => it.picture || it.name || it.price);
+            }
+
+            // --- СУММА fallback (из cellList → «К оплате при получении») ---
+            let fallbackAmount = '';
+            // 1) Старая схема: leftBlock.cellList.cells → price (оставить каскадом, приоритет выше)
+            const cells = getPath(order, 'leftBlock.cellList.cells', []);
+            if (Array.isArray(cells) && cells.length > 0) {
+                let total = 0;
+                cells.forEach(c => {
+                    const t = getPath(c, 'dsCell.rightBlock.price.price[0].text', '')
+                        || getPath(c, 'rightBlock.price.price[0].text', '');
+                    if (t.includes('₽')) total += parseFloat(parsePrice(t).replace(',', '.')) || 0;
+                });
+                if (total > 0) fallbackAmount = formatAmount(total);
+            }
+            // 2) НОВОЕ: сумма price.price[0].text по товарам rightBlock.products.products
+            //    (cellList удалён из новой схемы Ozon). Только запасной источник.
+            if (!fallbackAmount && Array.isArray(products) && products.length > 0) {
+                let total = 0;
+                products.forEach(p => {
+                    const t = getPath(p, 'price.price[0].text', '');
+                    if (t.includes('₽')) total += parseFloat(parsePrice(t).replace(',', '.')) || 0;
+                });
+                if (total > 0) fallbackAmount = formatAmount(total);
+            }
+
+            // --- СТАТУС ОПЛАТЫ (order-level) ---
+            // Если все товары имеют одинаковый статус — используем как order-level.
+            // При смешанных (есть «Не оплачен») — не угадываем, оставляем пустым.
+            let paymentStatus = '';
+            const paySet = new Set();
+            items.forEach(it => { if (it.paymentStatus) paySet.add(it.paymentStatus); });
+            if (paySet.size === 1) {
+                paymentStatus = [...paySet][0];
+            } else if (paySet.size === 0) {
+                // Пробуем badgeStatus.text напрямую (если extractProductPaymentStatus не сработал)
+                const badgeSet = new Set();
+                if (Array.isArray(products)) {
+                    products.forEach(p => {
+                        const bt = getPath(p, 'badgeStatus.text', '');
+                        if (bt) {
+                            const n = normalizePaymentStatus(bt);
+                            if (n) badgeSet.add(n);
+                        }
+                    });
+                }
+                if (badgeSet.size > 0) paymentStatus = pickBestPaymentStatus(badgeSet);
+            }
+
+            // Fallback 3: статус оплаты из cellList (orderlist JSON).
+            // cellList.cells[].dsCell.centerBlock.title.text содержит
+            // «К оплате при получении» / «Оплачено» / «Не оплачен» и т.п.
+            // Это order-level статус оплаты, видимый на карточке заказа.
+            if (!paymentStatus) {
+                const cellPaySet = new Set();
+                if (Array.isArray(cells)) {
+                    cells.forEach(c => {
+                        const cellTitle = getPath(c, 'dsCell.centerBlock.title.text', '')
+                            || getPath(c, 'centerBlock.title.text', '');
+                        if (cellTitle) {
+                            const n = normalizePaymentStatus(cellTitle);
+                            if (n) cellPaySet.add(n);
+                        }
+                    });
+                }
+                if (cellPaySet.size > 0) {
+                    paymentStatus = pickBestPaymentStatus(cellPaySet);
+                }
+            }
+
+            // --- УСЛОВИЯ N/A (B2) — вычисляются ДО возврата заказа ---
+            // pickupPoint: leftBlock.title отсутствует И subtitle = «Доставка в пункт выдачи».
+            // Адрес не потерян — восстановится из orderdetails (detailsAddress) на этапе enrich.
+            // Если fetch orderdetails упадёт — enrich добавит диагностическую запись (FAIL).
+            // Реальный subtitle — «Доставка в пункт выдачи» (буква «а» после «доставк»,
+            // поэтому [а-яё]* вместо \s+). Фиксирует N/A для новой схемы Ozon.
+            if (!pickupPoint && /^доставк[а-яё]*\s+в\s+пункт\s+выдачи/i.test(subtitleText)) {
+                _na.push('pickupPoint');
+            }
+            // paymentStatus: заказ доставлен И хотя бы один источник оплаты существует
+            // (badgeStatus / picture.badge / label / cellList), но статус не распознан.
+            // Если в заказе НЕТ НИ ОДНОГО источника оплаты — это FAIL (поломка схемы), не N/A.
+            const isDelivered = /доставлен|получен/i.test(deliveryStatus);
+            if (isDelivered && !paymentStatus) {
+                let hasPaySource = false;
+                if (Array.isArray(products)) {
+                    for (const p of products) {
+                        if (getPath(p, 'badgeStatus.text', '')
+                            || getPath(p, 'picture.badge', '')
+                            || getPath(p, 'picture.label', '')
+                            || getPath(p, 'badge', '')
+                            || getPath(p, 'label', '')) {
+                            hasPaySource = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasPaySource && Array.isArray(cells)) {
+                    for (const c of cells) {
+                        if (getPath(c, 'dsCell.centerBlock.title.text', '')
+                            || getPath(c, 'centerBlock.title.text', '')) {
+                            hasPaySource = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasPaySource) _na.push('paymentStatus');
+            }
+            // cardDeliveryDate / fallbackAmount — N/A не ставятся:
+            //   cardDeliveryDate — у доставленных OK из statusText, у «В пути» — окно доставки;
+            //   fallbackAmount — всегда FAIL при отсутствии (сигнал, что сумма не извлекается).
+
+            // --- ПЕРЕНОС per-product СТАТУСОВ ОПЛАТЫ (C1: jsonPayment в JSON-first) ---
+            // Источник статуса — items[].paymentStatus = extractProductPaymentStatus(p)
+            // → extractPaymentStatusFromAny(p) → badgeStatus fallback.
+            const jsonPayment = items.map((it, pi) => ({
+                productIdx: pi,
+                status: it.paymentStatus,
+                price: it.price
+            })).filter(jp => jp.status);
+
+            return {
+                orderNumber,
+                date,
+                deliveryStatus,
+                items,
+                paymentStatus,
+                fallbackAmount,
+                pickupPoint,
+                cardDeliveryDate,
+                jsonPayment: jsonPayment.length ? jsonPayment : undefined,
+                _dateFromLeftBlock,
+                _statusText: statusText,
+                _na,
+                _source: 'json'
+            };
+        }).filter(Boolean);
+
+        return orders;
+    }
+
+    // Тонкая DOM-обёртка: читает state-orderList из document, парсит JSON
+    // и делегирует чистое ядро parseOrdersV2JSON. Диагностика полей (logParseResult)
+    // выполняется ЗДЕСЬ — у обёртки есть доступ к order._na, поэтому notApplicable
+    // подставляется правильно (поля N/A не маскируют реальные поломки).
     function parseOrdersFromStateJSON() {
         try {
             const stateEl = document.querySelector('[id*="state-orderList"]');
@@ -481,233 +760,39 @@
             // Снимок полного JSON orderList (один раз на всю страницу)
             Diagnostics.snapshotRawData('[orderList]', null, raw, null);
 
-            const orders = ordersArr.map((order, oi) => {
-                const leftBlock = order?.leftBlock || {};
-                const rightBlock = order?.rightBlock || {};
+            const orders = parseOrdersV2JSON(ordersArr);
 
-                // --- НОМЕР ЗАКАЗА из action.link ---
-                // link приходит с экранированными слешами; после JSON.parse это обычная строка.
-                // Поддерживаем два формата action:
-                //   1) BEHAVIOR_TYPE_REDIRECT — обычная ссылка с ?order=XXXXXXXX
-                //   2) BEHAVIOR_TYPE_COMPOSER_ACTION — составной/мульти-заказ, ссылка вида
-                //      v2/cacheOrderProducts?data=eyJwb3N0aW5ncyI6WyI1ODk1NzY0OS0wNTgzLTEi...
-                //      где data — base64 от JSON {"postings":["XXXXXXXX-NNN-1","XXXXXXXX-NNN-2",...]}.
-                //      Номер заказа — общий префикс до первого дефиса-сегмента отправления.
-                let orderNumber = '';
-                const linkCandidates = [
-                    leftBlock?.common?.action?.link,
-                    leftBlock?.textIcon?.common?.action?.link,
-                    leftBlock?.title?.common?.action?.link,
-                    rightBlock?.products?.common?.action?.link,
-                ].filter(Boolean);
-                for (const lnk of linkCandidates) {
-                    const s = String(lnk);
-                    // Путь 1: обычная редирект-ссылка с ?order=
-                    const mm = s.match(/order=(\d+(?:-?\d+)?)/);
-                    if (mm) { orderNumber = mm[1]; break; }
-                    // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
-                    // Чистая логика вынесена в extractComposerAction (тестируется в F3).
-                    const composerNumber = extractComposerAction(s);
-                    if (composerNumber) { orderNumber = composerNumber; break; }
-                    if (/[?&]data=/.test(s)) {
-                        // Диагностика: data-параметр был, но номер не извлечён (битый base64/JSON)
-                        Diagnostics.logError('', `parseOrdersFromStateJSON.composerAction#${oi}`,
-                            s.slice(0, 300), new Error('extractComposerAction → null (битый base64/JSON)'));
-                    }
+            // Диагностика: логируем результат извлечения полей из JSON по одному
+            // разу на заказ (поля сохранены как раньше). notApplicable берётся из
+            // order._na (вычислен чистым ядром, см. B2).
+            orders.forEach(order => {
+                const na = order._na || [];
+                // Дата заказа: как в старом коде — JSON.date логируется только когда
+                // дата восстановлена из leftBlock-fallback (OK) или не найдена вовсе (FAIL).
+                // Из statusText дата считается primary-источником и не логируется.
+                if (order._dateFromLeftBlock) {
+                    Diagnostics.logParseResult(order.orderNumber, 'JSON.date',
+                        'fallback: leftBlock (title/common/textIcon) → parseRussianDate', order.date);
+                } else if (!order.date) {
+                    Diagnostics.logParseResult(order.orderNumber, 'JSON.date',
+                        'parseRussianDate(statusText + leftBlock) → empty',
+                        'дата заказа не определена (statusText: ' + (order._statusText || '') + ')');
                 }
-
-                if (!orderNumber) {
-                    Diagnostics.logError('', `parseOrdersFromStateJSON.orderNumber#${oi}`,
-                        JSON.stringify(order).slice(0, 500), 'orderNumber not found in JSON order');
-                    return null;
-                }
-
-                // --- СТАТУС ---
-                const statusText = leftBlock?.textIcon?.text?.text
-                    || leftBlock?.textIcon?.common?.text?.text || '';
-                const deliveryStatus = normalizeStatus(statusText);
-                // Дата заказа (B2b, PRIMARY fallback): парсим только из statusText
-                // («Получен 6 июля»). Для «В пути»/«Отменён»/«Собирается» statusText
-                // даты не содержит — подключаем fallback из текстовых полей leftBlock.
-                let date = parseRussianDate(statusText);
-                if (!date) {
-                    // Fallback из JSON orderlist (B2b): парсим parseRussianDate по текстовым
-                    // полям leftBlock КРОМЕ subtitle (subtitle занят датой доставки).
-                    const leftDateCandidates = [
-                        leftBlock?.title?.common?.text || leftBlock?.title?.text || '',
-                        leftBlock?.common?.text || '',
-                        leftBlock?.textIcon?.common?.text?.text || leftBlock?.textIcon?.text?.text || '',
-                    ].filter(Boolean);
-                    for (const cand of leftDateCandidates) {
-                        date = parseRussianDate(cand);
-                        if (date) {
-                            // Диагностика: дата заказа восстановлена из leftBlock (не из statusText)
-                            Diagnostics.logParseResult(orderNumber, 'JSON.date', 'fallback: leftBlock (title/common/textIcon) → parseRussianDate', date);
-                            break;
-                        }
-                    }
-                }
-                if (!date) {
-                    // Диагностика: дата заказа не найдена ни в statusText, ни в leftBlock —
-                    // фиксируем в Diagnostics (B2b: для каждого заказа дата ИЛИ лог).
-                    Diagnostics.logParseResult(orderNumber, 'JSON.date', 'parseRussianDate(statusText + leftBlock) → empty', 'дата заказа не определена (statusText: ' + statusText + ')');
-                }
-
-                // --- АДРЕС ПВЗ ---
-                const titleText = leftBlock?.title?.text || '';
-                let pickupPoint = titleText.replace(/^Пункт\s+Ozon[:\s]*/i, '').trim();
-                // "Доставка в пункт выдачи" — это не адрес, очищаем (подтянется из orderdetails)
-                if (/^доставк/i.test(pickupPoint)) {
-                    pickupPoint = '';
-                }
-
-                // --- ДАТА/ВРЕМЯ ВЫДАЧИ ---
-                const subtitleText = leftBlock?.subtitle?.text || '';
-                let cardDeliveryDate = parseDeliveryDate(subtitleText)
-                    || parseDeliveryDate(titleText)
-                    || parseDeliveryDate(statusText);
-
-                // --- ТОВАРЫ (с фото, ценой, статусом оплаты) ---
-                let items = [];
-                const products = rightBlock?.products?.products;
-                if (Array.isArray(products)) {
-                    items = products.map((p, pi) => {
-                        // Фото: несколько возможных путей внутри продукта orderlist
-                        const picture = p?.image?.productMedia?.image?.url
-                            || p?.picture?.image?.image
-                            || p?.image?.url
-                            || '';
-                        // Цена
-                        let price = '';
-                        try {
-                            price = parsePrice(p?.price?.price?.[0]?.text || p?.price?.[0]?.text || '');
-                        } catch(e) {
-                            Diagnostics.logParseResult(orderNumber, `JSON.product#${pi}.price`,
-                                'p.price.price[0].text', JSON.stringify(p?.price || {}).slice(0, 200));
-                        }
-                        // Статус оплаты товара
-                        const itemPayment = extractProductPaymentStatus(p)
-                            || extractPaymentStatusFromAny(p)
-                            || '';
-                        // Количество
-                        let qty = '1';
-                        try {
-                            const rawQty = p?.addToCartButton?.action?.quantity;
-                            if (rawQty != null) {
-                                const n = parseInt(rawQty, 10);
-                                if (!isNaN(n) && n > 0) qty = String(n);
-                            }
-                        } catch(e) {}
-                        return {
-                            name: p?.title?.name?.text || '',
-                            price,
-                            qty,
-                            shipmentStatus: deliveryStatus,
-                            deliveryDate: cardDeliveryDate,
-                            paymentStatus: itemPayment,
-                            picture
-                        };
-                    }).filter(it => it.picture || it.name || it.price);
-                }
-
-                // --- СУММА fallback (из cellList → «К оплате при получении») ---
-                let fallbackAmount = '';
-                try {
-                    const cells = leftBlock?.cellList?.cells;
-                    if (Array.isArray(cells)) {
-                        let total = 0;
-                        cells.forEach(c => {
-                            const t = c?.dsCell?.rightBlock?.price?.price?.[0]?.text
-                                || c?.rightBlock?.price?.price?.[0]?.text || '';
-                            if (t.includes('₽')) total += parseFloat(parsePrice(t)) || 0;
-                        });
-                        if (total > 0) {
-                            fallbackAmount = total % 1 === 0
-                                ? String(total)
-                                : total.toFixed(2).replace('.', ',');
-                        }
-                    }
-                } catch(e) {
-                    Diagnostics.logError(orderNumber, 'parseOrdersFromStateJSON.fallbackAmount', '', e);
-                }
-
-                // --- СТАТУС ОПЛАТЫ (order-level) ---
-                // Если все товары имеют одинаковый статус — используем как order-level.
-                // При смешанных (есть «Не оплачен») — не угадываем, оставляем пустым.
-                let paymentStatus = '';
-                const paySet = new Set();
-                items.forEach(it => { if (it.paymentStatus) paySet.add(it.paymentStatus); });
-                if (paySet.size === 1) {
-                    paymentStatus = [...paySet][0];
-                } else if (paySet.size === 0) {
-                    // Пробуем badgeStatus.text напрямую (если extractProductPaymentStatus не сработал)
-                    const badgeSet = new Set();
-                    if (Array.isArray(products)) {
-                        products.forEach(p => {
-                            const bt = p?.badgeStatus?.text;
-                            if (bt) {
-                                const n = normalizePaymentStatus(bt);
-                                if (n) badgeSet.add(n);
-                            }
-                        });
-                    }
-                    if (badgeSet.size > 0) paymentStatus = pickBestPaymentStatus(badgeSet);
-                }
-
-                // Fallback 3: статус оплаты из cellList (orderlist JSON).
-                // cellList.cells[].dsCell.centerBlock.title.text содержит
-                // «К оплате при получении» / «Оплачено» / «Не оплачен» и т.п.
-                // Это order-level статус оплаты, видимый на карточке заказа.
-                if (!paymentStatus) {
-                    try {
-                        const cells = leftBlock?.cellList?.cells;
-                        if (Array.isArray(cells)) {
-                            const cellPaySet = new Set();
-                            cells.forEach(c => {
-                                const titleText = c?.dsCell?.centerBlock?.title?.text
-                                    || c?.centerBlock?.title?.text || '';
-                                if (titleText) {
-                                    const n = normalizePaymentStatus(titleText);
-                                    if (n) cellPaySet.add(n);
-                                }
-                            });
-                            if (cellPaySet.size > 0) {
-                                paymentStatus = pickBestPaymentStatus(cellPaySet);
-                            }
-                        }
-                    } catch(e) {
-                        Diagnostics.logError(orderNumber, 'parseOrdersFromStateJSON.cellListPayment', '', e);
-                    }
-                }
-
-                // Диагностика: логируем результат извлечения полей из JSON
-                Diagnostics.logParseResult(orderNumber, 'JSON.orderNumber',
-                    'leftBlock.common.action.link → /order=/', orderNumber);
-                Diagnostics.logParseResult(orderNumber, 'JSON.deliveryStatus',
-                    'leftBlock.textIcon.text.text → normalizeStatus', deliveryStatus);
-                Diagnostics.logParseResult(orderNumber, 'JSON.pickupPoint',
-                    'leftBlock.title.text', pickupPoint);
-                Diagnostics.logParseResult(orderNumber, 'JSON.cardDeliveryDate',
-                    'leftBlock.subtitle.text → parseDeliveryDate', cardDeliveryDate);
-                Diagnostics.logParseResult(orderNumber, 'JSON.itemsCount',
-                    'rightBlock.products.products', String(items.length));
-                Diagnostics.logParseResult(orderNumber, 'JSON.fallbackAmount',
-                    'cellList.cells → price', fallbackAmount);
-                Diagnostics.logParseResult(orderNumber, 'JSON.paymentStatus',
-                    'items / badgeStatus → normalizePaymentStatus', paymentStatus);
-
-                return {
-                    orderNumber,
-                    date,
-                    deliveryStatus,
-                    items,
-                    paymentStatus,
-                    fallbackAmount,
-                    pickupPoint,
-                    cardDeliveryDate,
-                    _source: 'json'
-                };
-            }).filter(Boolean);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.orderNumber',
+                    'leftBlock.common.action.link → /order=/', order.orderNumber);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.deliveryStatus',
+                    'leftBlock.textIcon.text.text → normalizeStatus', order.deliveryStatus);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.pickupPoint',
+                    'leftBlock.title.text', order.pickupPoint, na.includes('pickupPoint'));
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.cardDeliveryDate',
+                    'leftBlock.subtitle.text → parseDeliveryDate', order.cardDeliveryDate);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.itemsCount',
+                    'rightBlock.products.products', String(order.items.length));
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.fallbackAmount',
+                    'cellList.cells → price | products[].price', order.fallbackAmount);
+                Diagnostics.logParseResult(order.orderNumber, 'JSON.paymentStatus',
+                    'items / badgeStatus → normalizePaymentStatus', order.paymentStatus, na.includes('paymentStatus'));
+            });
 
             console.log(`[Ozon Copier] JSON-first: извлечено ${orders.length} заказов из state-orderList`);
             return orders;

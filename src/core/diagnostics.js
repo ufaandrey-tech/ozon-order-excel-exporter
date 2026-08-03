@@ -13,7 +13,7 @@
 //   из того же скоупа.
 // Платформа: window/navigator ТОЛЬКО в рантайм-методах Diagnostics;
 // buildDiagnosticsMarkdown — чистый (env передаётся параметром).
-// Объявляет: Diagnostics, buildDiagnosticsMarkdown.
+// Объявляет: createParseResult, Diagnostics, buildDiagnosticsMarkdown.
 // ============================================================
     // ============================================================
     // 1b. ДИАГНОСТИЧЕСКИЙ МОДУЛЬ
@@ -25,6 +25,21 @@
     //   - parseResults[]:   заказ → поле → ожидаемый путь → фактическое значение → OK/FAIL
     //   - imageLogs[]:      url → HTTP-статус → байты → результат вставки в Excel
     // ============================================================
+    // ЧИСТАЯ функция: создаёт запись diff-отчёта со статусом OK / FAIL / N/A.
+    // Экспортируется гардом и тестируется (E4). Diagnostics.logParseResult вызывает её.
+    function createParseResult(orderNumber, field, expectedPath, actualValue, notApplicable) {
+        return {
+            timestamp: new Date().toISOString(),
+            orderNumber: orderNumber || '',
+            field: field || '',
+            expectedPath: expectedPath || '',
+            actualValue: (actualValue == null ? '' : (
+                typeof actualValue === 'string' ? actualValue : JSON.stringify(actualValue)
+            )),
+            status: notApplicable ? 'N/A' : (actualValue ? 'OK' : 'FAIL')
+        };
+    }
+
     const Diagnostics = {
         enabled: false,
         errors: [],
@@ -58,16 +73,9 @@
         },
 
         /** Зафиксировать результат извлечения конкретного поля. */
-        logParseResult(orderNumber, field, expectedPath, actualValue) {
+        logParseResult(orderNumber, field, expectedPath, actualValue, notApplicable) {
             if (!this.enabled) return;
-            this.parseResults.push({
-                timestamp: new Date().toISOString(),
-                orderNumber: orderNumber || '',
-                field: field || '',
-                expectedPath: expectedPath || '',
-                actualValue: this._toString(actualValue),
-                status: actualValue ? 'OK' : 'FAIL'
-            });
+            this.parseResults.push(createParseResult(orderNumber, field, expectedPath, actualValue, notApplicable));
         },
 
         /** Сохранить сырой снимок DOM/JSON для заказа (для воспроизведения проблемы).
@@ -167,7 +175,8 @@
     // Принимает env (метаданные) и deduped (список распарсенных заказов).
     // Возвращает одну большую строку Markdown со всеми секциями.
     // ------------------------------------------------------------
-    function buildDiagnosticsMarkdown(env, deduped) {
+    function buildDiagnosticsMarkdown(env, deduped, state) {
+        state = state || Diagnostics;
         const lines = [];
         const L = (s) => lines.push(s);
         const now = new Date();
@@ -207,12 +216,12 @@
         L('| Метрика | Значение |');
         L('|---|---|');
         L(`| Найдено заказов (после дедупликации) | ${deduped.length} |`);
-        L(`| Всего ошибок | ${Diagnostics.errors.length} |`);
-        L(`| parse-результатов (diff) | ${Diagnostics.parseResults.length} |`);
-        L(`| сырых снимков orderlist | ${Diagnostics.rawSnapshots.length} |`);
-        L(`| снимков orderdetails | ${Diagnostics.orderDetailsSnapshots.length} |`);
-        L(`| DOM-проб | ${Diagnostics.domProbes.length} |`);
-        L(`| записей о фото | ${Diagnostics.imageLogs.length} |`);
+        L(`| Всего ошибок | ${state.errors.length} |`);
+        L(`| parse-результатов (diff) | ${state.parseResults.length} |`);
+        L(`| сырых снимков orderlist | ${state.rawSnapshots.length} |`);
+        L(`| снимков orderdetails | ${state.orderDetailsSnapshots.length} |`);
+        L(`| DOM-проб | ${state.domProbes.length} |`);
+        L(`| записей о фото | ${state.imageLogs.length} |`);
         L('');
 
         // Краткая сводка по заказам (как их видит скрипт)
@@ -241,10 +250,10 @@
         L('Здесь показано, какие CSS-селекторы срабатывают на реальной странице, ');
         L('а какие — нет. Это ключ к обновлению логики извлечения адреса пункта выдачи.');
         L('');
-        if (Diagnostics.domProbes.length === 0) {
+        if (state.domProbes.length === 0) {
             L('_DOM-пробы не собирались (заказы не найдены или этап пропущен)._');
         } else {
-            Diagnostics.domProbes.forEach(probe => {
+            state.domProbes.forEach(probe => {
                 L(`### 📦 Заказ \`${probe.orderNumber || '—'}\` · scope: \`${probe.scope}\` · root: \`${probe.rootSelector}\``);
                 L('');
                 if (!probe.probes || probe.probes.length === 0) {
@@ -285,17 +294,17 @@
         // === 4. Diff парсинга ===
         L(`## 4. 🧪 Diff парсинга (ожидание vs факт)`);
         L('');
-        if (Diagnostics.parseResults.length === 0) {
+        if (state.parseResults.length === 0) {
             L('_parse-результатов нет._');
         } else {
             L('| # | Время | Заказ | Поле | Ожидаемый путь | Фактическое значение | Статус |');
             L('|---|---|---|---|---|---|---|');
-            Diagnostics.parseResults.forEach((pr, i) => {
+            state.parseResults.forEach((pr, i) => {
                 const val = (pr.actualValue || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 500);
                 const exp = (pr.expectedPath || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
                 const on = (pr.orderNumber || '').replace(/\|/g, '\\|');
                 const fld = (pr.field || '').replace(/\|/g, '\\|');
-                const st = pr.status === 'OK' ? '✅ OK' : '❌ FAIL';
+                const st = pr.status === 'OK' ? '✅ OK' : (pr.status === 'N/A' ? '🟡 N/A' : '❌ FAIL');
                 L(`| ${i + 1} | ${pr.timestamp} | ${on} | ${fld} | ${exp} | ${val} | ${st} |`);
             });
         }
@@ -306,10 +315,10 @@
         // === 5. Ошибки ===
         L(`## 5. ⚠️ Ошибки`);
         L('');
-        if (Diagnostics.errors.length === 0) {
+        if (state.errors.length === 0) {
             L('_Ошибок не зафиксировано._');
         } else {
-            Diagnostics.errors.forEach((err, i) => {
+            state.errors.forEach((err, i) => {
                 L(`### [${i + 1}] ${err.timestamp} · заказ \`${err.orderNumber || '—'}\``);
                 L('');
                 L(`- **Этап:** \`${err.stage || '—'}\``);
@@ -335,10 +344,10 @@
         // === 6. Сырые данные orderlist ===
         L(`## 6. 🗂 Сырые данные orderlist (cardHTML / stateOrderList / shipmentWidgets)`);
         L('');
-        if (Diagnostics.rawSnapshots.length === 0) {
+        if (state.rawSnapshots.length === 0) {
             L('_Сырых снимков orderlist нет._');
         } else {
-            Diagnostics.rawSnapshots.forEach((snap, i) => {
+            state.rawSnapshots.forEach((snap, i) => {
                 L(`### [${i + 1}] Заказ \`${snap.orderNumber || '—'}\``);
                 L('');
                 L(`- Время: ${snap.timestamp}`);
@@ -385,10 +394,10 @@
         // === 7. Снимки orderdetails ===
         L(`## 7. 📄 Снимки страниц orderdetails`);
         L('');
-        if (Diagnostics.orderDetailsSnapshots.length === 0) {
+        if (state.orderDetailsSnapshots.length === 0) {
             L('_Снимки orderdetails не собирались (этап fetch не выполнялся)._');
         } else {
-            Diagnostics.orderDetailsSnapshots.forEach((snap, i) => {
+            state.orderDetailsSnapshots.forEach((snap, i) => {
                 L(`### [${i + 1}] Заказ \`${snap.orderNumber || '—'}\``);
                 L('');
                 L(`- Время: ${snap.timestamp}`);
@@ -414,12 +423,12 @@
         // === 8. Фото ===
         L(`## 8. 🖼 Фото`);
         L('');
-        if (Diagnostics.imageLogs.length === 0) {
+        if (state.imageLogs.length === 0) {
             L('_Записей о фото нет._');
         } else {
             L('| # | Время | URL | HTTP | Байты | Результат | Ошибка |');
             L('|---|---|---|---|---|---|---|');
-            Diagnostics.imageLogs.forEach((il, i) => {
+            state.imageLogs.forEach((il, i) => {
                 const url = (il.url || '').replace(/\|/g, '\\|');
                 const err = (il.error || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
                 const res = il.result === 'CACHED' ? '✅ CACHED' : '❌ ' + (il.result || '');

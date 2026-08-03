@@ -12,7 +12,8 @@
 //   pickBestPaymentStatus, parseDeliveryDate, parseRussianDate,
 //   formatDateParts, MONTHS_RU_NAMES, parsePrice, extractProductPaymentStatus,
 //   extractPaymentStatusFromAny, mergePaymentStatus.
-// Объявляет: fetchOrderDetailsOnce, fetchOrderDetails, enrichOrdersWithProducts.
+// Объявляет: extractAddressFromDoc, fetchOrderDetailsOnce, fetchOrderDetails,
+//   enrichOrdersWithProducts.
 // ============================================================
     // ============================================================
     // 7. ПОДГРУЗКА ТОВАРОВ С ЦЕНАМИ ИЗ /my/orderdetails/
@@ -218,119 +219,11 @@
                 }
             });
 
-            // Извлекаем адрес пункта выдачи со страницы orderdetails.
-            // Каскад селекторов: Ozon периодически меняет хэш-префикс (b35_5_1 → b35_5_2 → ...),
-            // поэтому сначала пробуем точные хэши, затем структурный fallback по контексту блока.
+            // Извлекаем адрес пункта выдачи со страницы orderdetails (чистый каскад, см. E5)
             let detailsAddress = '';
             try {
-                // 1) Точные селекторы для известных версий разметки (от новых к старым)
-                const _addrHashSelectors = [
-                    '.b35_5_3-b4.tsBody400Small',   // актуальная разметка (июль 2026)
-                    '.b35_5_2-b4.tsBody400Small',   // предыдущая разметка
-                    '.b35_5_1-b4.tsBody400Small',   // более старая разметка
-                ];
-                let addrEl = null;
-                for (const sel of _addrHashSelectors) {
-                    addrEl = doc.querySelector(sel);
-                    if (addrEl) break;
-                }
-                // 2) Структурный fallback: span внутри блока доставки [class*="b35"],
-                //    чей текст начинается с «Пункт Ozon,» (полный адрес, а не лейбл «Пункт Ozon •»).
-                //    Устойчив к любой смене хэша b35_5_X.
-                if (!addrEl) {
-                    const _candidates = doc.querySelectorAll('[class*="b35"] span');
-                    for (const el of _candidates) {
-                        const t = (el.textContent || '').trim();
-                        // Матчит "Пункт Ozon, ..." и "Пункт выдачи крупногабаритных товаров Ozon, ..."
-                        if (/^Пункт\s+(Ozon|выдачи)\s*,?\s*.+/i.test(t)) { addrEl = el; break; }
-                    }
-                }
-                // Более полный адрес: "Пункт Ozon, Россия, Ростовская, ..., 30"
-                if (addrEl) {
-                    const fullText = (addrEl.textContent || '').trim();
-                    // Извлекаем после "Пункт Ozon, " — полный адрес
-                    const m = fullText.match(/Пункт\s+Ozon[,\s]+(.+)/i);
-                    detailsAddress = m ? m[1].trim() : fullText.replace(/^(Пункт\s+Ozon[,\s]*)/i, '');
-                }
-                if (!detailsAddress) {
-                    // 3) Последний шанс — тот же подход что и на orderlist: .tsCompactControl500Medium
-                    const altEl = doc.querySelector('.tsCompactControl500Medium');
-                    if (altEl && /пункт/i.test(altEl.textContent || '')) {
-                        detailsAddress = (altEl.textContent || '').trim().replace(/^(Пункт Ozon[:\s]*)/i, '');
-                    }
-                }
-                // Диагностика: логируем результат извлечения адреса
-                Diagnostics.logParseResult(orderNumber, 'detailsAddress',
-                    'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → .tsCompactControl500Medium',
-                    detailsAddress);
-
-                // Диагностика: пробы DOM-селекторов для detailsAddress на orderdetails.
-                // Пробуем те же и дополнительные селекторы на doc (DOM страницы orderdetails).
-                const _addrProbes = [];
-                const _addrSelectors = [
-                    '.b35_5_3-b4.tsBody400Small',
-                    '.b35_5_2-b4.tsBody400Small',
-                    '.b35_5_1-b4.tsBody400Small',
-                    '.b35_5_3-b4',
-                    '.b35_5_2-b4',
-                    '.b35_5_1-b4',
-                    '.tsCompactControl500Medium',
-                    '.tsBody400Small',
-                    '.tsBody500Medium',
-                    '.tsCompactControl400Small',
-                    '[class*="pickup"]',
-                    '[class*="address"]',
-                    '[class*="point"]',
-                    '[class*="b35"]'
-                ];
-                _addrSelectors.forEach(sel => {
-                    try {
-                        const els = doc.querySelectorAll(sel);
-                        els.forEach((el, i) => {
-                            if (i >= 8) return;
-                            const txt = (el.textContent || '').trim().slice(0, 300);
-                            const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-                            _addrProbes.push({
-                                selector: sel,
-                                found: true,
-                                count: els.length,
-                                text: txt,
-                                className: cls,
-                                tagName: el.tagName,
-                                outerHTML: (el.outerHTML || '').slice(0, 400)
-                            });
-                        });
-                        if (els.length === 0) {
-                            _addrProbes.push({ selector: sel, found: false, count: 0, text: '', className: '', tagName: '', outerHTML: '' });
-                        }
-                    } catch(e) {
-                        _addrProbes.push({ selector: sel, found: false, count: 0, text: `ERROR: ${e.message}`, className: '', tagName: '', outerHTML: '' });
-                    }
-                });
-                // Поиск всех элементов с «пункт» / «пвз» / «выдач» на странице orderdetails
-                try {
-                    const _allEls = doc.querySelectorAll('*');
-                    const _punktEls = [];
-                    _allEls.forEach(el => {
-                        const t = (el.textContent || '').trim();
-                        if (t.length > 0 && t.length < 200 && /пункт|пвз|выдач|адрес/i.test(t)) {
-                            _punktEls.push(el);
-                        }
-                    });
-                    _punktEls.slice(0, 12).forEach(el => {
-                        const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-                        _addrProbes.push({
-                            selector: '(text contains пункт/пвз/выдач/адрес)',
-                            found: true,
-                            count: _punktEls.length,
-                            text: (el.textContent || '').trim().slice(0, 300),
-                            className: cls,
-                            tagName: el.tagName,
-                            outerHTML: (el.outerHTML || '').slice(0, 400)
-                        });
-                    });
-                } catch(e) {}
-                Diagnostics.logDomProbe(orderNumber, 'orderdetails', 'document', _addrProbes);
+                const extracted = extractAddressFromDoc(doc, orderNumber);
+                detailsAddress = extracted.address;
             } catch(e) {
                 Diagnostics.logError(orderNumber, 'fetchOrderDetails.detailsAddress', '', e);
             }
@@ -401,12 +294,137 @@
                 Diagnostics.logError(orderNumber, 'fetchOrderDetails.orderDate', '', e);
             }
 
-            return { items: allItems, address: detailsAddress, orderDate };
+            return { items: allItems, address: detailsAddress, orderDate, deliveryDate };
         } catch(e) {
             // AbortError не повторяем — отмена по сигналу вышестоящего кода
             if (e.name === 'AbortError') return { items: [], address: '' };
             // Пробрасываем ошибку в обёртку fetchOrderDetails для retry
             throw e;
+        }
+    }
+
+    // Извлечение адреса пункта выдачи со страницы orderdetails.
+    // Чистая по doc: работает с уже распарсенным document (querySelector/querySelectorAll).
+    // Возвращает { address, probes } (probes — массив DOM-проб).
+    // Каскад селекторов: Ozon периодически меняет хэш-префикс (b35_5_1 → b35_5_2 → ...),
+    // поэтому сначала пробуем точные хэши, затем структурный fallback по контексту блока.
+    // Диагностика logParseResult/detailsAddress + logDomProbe — здесь (как было в
+    // fetchOrderDetailsOnce); Diagnostics безопасен при enabled=false.
+    function extractAddressFromDoc(doc, orderNumber) {
+        let detailsAddress = '';
+        try {
+            // 1) Точные селекторы для известных версий разметки (от новых к старым)
+            const _addrHashSelectors = [
+                '.b35_5_3-b4.tsBody400Small',   // актуальная разметка (июль 2026)
+                '.b35_5_2-b4.tsBody400Small',   // предыдущая разметка
+                '.b35_5_1-b4.tsBody400Small',   // более старая разметка
+            ];
+            let addrEl = null;
+            for (const sel of _addrHashSelectors) {
+                addrEl = doc.querySelector(sel);
+                if (addrEl) break;
+            }
+            // 2) Структурный fallback: span внутри блока доставки [class*="b35"],
+            //    чей текст начинается с «Пункт Ozon,» (полный адрес, а не лейбл «Пункт Ozon •»).
+            //    Устойчив к любой смене хэша b35_5_X.
+            if (!addrEl) {
+                const _candidates = doc.querySelectorAll('[class*="b35"] span');
+                for (const el of _candidates) {
+                    const t = (el.textContent || '').trim();
+                    // Матчит "Пункт Ozon, ..." и "Пункт выдачи крупногабаритных товаров Ozon, ..."
+                    if (/^Пункт\s+(Ozon|выдачи)\s*,?\s*.+/i.test(t)) { addrEl = el; break; }
+                }
+            }
+            // Более полный адрес: "Пункт Ozon, Россия, Ростовская, ..., 30"
+            if (addrEl) {
+                const fullText = (addrEl.textContent || '').trim();
+                // Извлекаем после "Пункт Ozon, " — полный адрес
+                const m = fullText.match(/Пункт\s+Ozon[,\s]+(.+)/i);
+                detailsAddress = m ? m[1].trim() : fullText.replace(/^(Пункт\s+Ozon[,\s]*)/i, '');
+            }
+            if (!detailsAddress) {
+                // 3) Последний шанс — тот же подход что и на orderlist: .tsCompactControl500Medium
+                const altEl = doc.querySelector('.tsCompactControl500Medium');
+                if (altEl && /пункт/i.test(altEl.textContent || '')) {
+                    detailsAddress = (altEl.textContent || '').trim().replace(/^(Пункт Ozon[:\s]*)/i, '');
+                }
+            }
+            // Диагностика: логируем результат извлечения адреса
+            Diagnostics.logParseResult(orderNumber, 'detailsAddress',
+                'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → .tsCompactControl500Medium',
+                detailsAddress);
+
+            // Диагностика: пробы DOM-селекторов для detailsAddress на orderdetails.
+            // Пробуем те же и дополнительные селекторы на doc (DOM страницы orderdetails).
+            const _addrProbes = [];
+            const _addrSelectors = [
+                '.b35_5_3-b4.tsBody400Small',
+                '.b35_5_2-b4.tsBody400Small',
+                '.b35_5_1-b4.tsBody400Small',
+                '.b35_5_3-b4',
+                '.b35_5_2-b4',
+                '.b35_5_1-b4',
+                '.tsCompactControl500Medium',
+                '.tsBody400Small',
+                '.tsBody500Medium',
+                '.tsCompactControl400Small',
+                '[class*="pickup"]',
+                '[class*="address"]',
+                '[class*="point"]',
+                '[class*="b35"]'
+            ];
+            _addrSelectors.forEach(sel => {
+                try {
+                    const els = doc.querySelectorAll(sel);
+                    els.forEach((el, i) => {
+                        if (i >= 8) return;
+                        const txt = (el.textContent || '').trim().slice(0, 300);
+                        const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+                        _addrProbes.push({
+                            selector: sel,
+                            found: true,
+                            count: els.length,
+                            text: txt,
+                            className: cls,
+                            tagName: el.tagName,
+                            outerHTML: (el.outerHTML || '').slice(0, 400)
+                        });
+                    });
+                    if (els.length === 0) {
+                        _addrProbes.push({ selector: sel, found: false, count: 0, text: '', className: '', tagName: '', outerHTML: '' });
+                    }
+                } catch(e) {
+                    _addrProbes.push({ selector: sel, found: false, count: 0, text: `ERROR: ${e.message}`, className: '', tagName: '', outerHTML: '' });
+                }
+            });
+            // Поиск всех элементов с «пункт» / «пвз» / «выдач» на странице orderdetails
+            try {
+                const _allEls = doc.querySelectorAll('*');
+                const _punktEls = [];
+                _allEls.forEach(el => {
+                    const t = (el.textContent || '').trim();
+                    if (t.length > 0 && t.length < 200 && /пункт|пвз|выдач|адрес/i.test(t)) {
+                        _punktEls.push(el);
+                    }
+                });
+                _punktEls.slice(0, 12).forEach(el => {
+                    const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+                    _addrProbes.push({
+                        selector: '(text contains пункт/пвз/выдач/адрес)',
+                        found: true,
+                        count: _punktEls.length,
+                        text: (el.textContent || '').trim().slice(0, 300),
+                        className: cls,
+                        tagName: el.tagName,
+                        outerHTML: (el.outerHTML || '').slice(0, 400)
+                    });
+                });
+            } catch(e) {}
+            Diagnostics.logDomProbe(orderNumber, 'orderdetails', 'document', _addrProbes);
+            return { address: detailsAddress, probes: _addrProbes };
+        } catch(e) {
+            Diagnostics.logError(orderNumber, 'fetchOrderDetails.detailsAddress', '', e);
+            return { address: '', probes: [] };
         }
     }
 
@@ -465,6 +483,30 @@
                 // Запасной адрес пункта выдачи со страницы orderdetails
                 if (!order.pickupPoint && data.address) {
                     order.pickupPoint = data.address;
+                }
+                // B2: pickupPoint помечен N/A на этапе orderlist (title отсутствует,
+                // subtitle = «Доставка в пункт выдачи»), адрес должен был восстановиться
+                // из orderdetails (detailsAddress). Если fetch упал и адрес НЕ восстановлен —
+                // это реальная потеря адреса → FAIL, а не N/A (записываем в ошибки).
+                if ((order._na || []).includes('pickupPoint') && !order.pickupPoint) {
+                    Diagnostics.logError(order.orderNumber,
+                        'pickupPoint.N/A но detailsAddress не восстановлен',
+                        'orderlist: leftBlock.title отсутствует, subtitle=«Доставка в пункт выдачи»',
+                        'fetch orderdetails не дал адрес (data.address пуст или fetch упал)');
+                    // W-1: явная запись в diff со статусом FAIL (не N/A): реальная потеря адреса.
+                    // logError выше попадает в секцию «⚠️ Ошибки», но НЕ перезаписывает
+                    // запись parseResults из этапа orderlist (там остался 🟡 N/A).
+                    // Здесь перезаписываем: notApplicable=false → createParseResult даёт FAIL.
+                    if (Diagnostics.enabled) {
+                        Diagnostics.logParseResult(order.orderNumber, 'JSON.pickupPoint',
+                            'leftBlock.title.text (N/A→FAIL: fetch упал, адрес не восстановлен)',
+                            order.pickupPoint || '', false); // notApplicable=false → FAIL
+                    }
+                }
+                // A3: дата доставки из orderdetails → на уровень заказа (для экспорта/сводки),
+                // если на orderlist она пуста
+                if (!order.cardDeliveryDate && data.deliveryDate) {
+                    order.cardDeliveryDate = data.deliveryDate;
                 }
                 // B2b (SECONDARY): дата заказа из orderdetails, если primary-fallback не дал.
                 // Если и тут пусто — дата уже зафиксирована в Diagnostics (parseOrdersFromStateJSON).

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ozon Order Copier",
-  "version": "9.15",
+  "version": "9.16",
   "description": "Экспорт заказов Ozon в Excel и буфер обмена с фото товаров. После установки на странице 'Мои заказы' появляются кнопки для копирования и скачивания.",
   "icons": {
     "16": "icons/icon16.png",

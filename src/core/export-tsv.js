@@ -121,8 +121,7 @@
         if (orders.length > 0) {
             tsv += '\n';
             tsv += ['', '', '', '', '', '', '', '', '', ''].join(sep) + '\n';
-            const grandTotalStr = isNaN(grandTotal) ? '' :
-                (grandTotal % 1 === 0 ? grandTotal.toString() : grandTotal.toFixed(2).replace('.', ','));
+            const grandTotalStr = isNaN(grandTotal) ? '' : formatAmount(grandTotal);
             tsv += ['ИТОГО:', orders.length + ' заказов, ' + totalRows + ' позиций', '', '', '', grandTotalStr, '', '', '', ''].join(sep) + '\n';
         }
 

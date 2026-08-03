@@ -6,7 +6,7 @@
 //   safeCell (717–722).
 // Зависимости: нет (чистые функции, DOM/GM не читают).
 // Объявляет: escapeHtml, backoffDelay, extractComposerAction,
-//   dedupeOrders, safeCell.
+//   dedupeOrders, safeCell, getPath, formatAmount.
 // ============================================================
 
     // ============================================================
@@ -83,4 +83,29 @@
         const s = String(value);
         if (s === '') return '';
         return /^[=+\-@]/.test(s) ? "'" + s : s;
+    }
+
+    // Безопасный доступ по пути 'a.b.c' и 'a.b[0].c'. Если путь не найден —
+    // возвращает fallback. НЕ логирует и НЕ бросает исключений (чистая).
+    function getPath(obj, path, fallback) {
+        const parts = String(path).split('.');
+        let cur = obj;
+        for (const p of parts) {
+            const m = p.match(/^(\w+)\[(\d+)\]$/);   // сегмент с индексом: price[0]
+            if (m) {
+                const key = m[1], idx = +m[2];
+                if (cur == null || typeof cur !== 'object' || !(key in cur)
+                    || !Array.isArray(cur[key]) || !(idx in cur[key])) return fallback;
+                cur = cur[key][idx];
+            } else {
+                if (cur == null || typeof cur !== 'object' || !(p in cur)) return fallback;
+                cur = cur[p];
+            }
+        }
+        return cur === undefined ? fallback : cur;
+    }
+
+    // Число → строка суммы: целые без дробной части, дробные — с запятой.
+    function formatAmount(num) {
+        return num % 1 === 0 ? String(num) : num.toFixed(2).replace('.', ',');
     }
