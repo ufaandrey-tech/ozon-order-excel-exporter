@@ -13,4 +13,4 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.20';
+    const SCRIPT_VERSION = '9.21';
