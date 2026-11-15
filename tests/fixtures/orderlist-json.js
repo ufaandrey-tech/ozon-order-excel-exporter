@@ -118,7 +118,19 @@ const ORDERLIST_JSON_NEW = {
     ]
 };
 
+// Актуальный формат ссылок из диагностического отчёта 2026-11-15:
+// query-параметр переименован Ozon с order на orderNumber.
+const ORDERLIST_JSON_ORDER_NUMBER = JSON.parse(JSON.stringify(ORDERLIST_JSON_NEW));
+ORDERLIST_JSON_ORDER_NUMBER.ordersV2.forEach(order => {
+    const link = order.leftBlock.common.action.link;
+    delete order.leftBlock.common;
+    order.leftBlock.textIcon.common = {
+        action: { link: link.replace('?order=', '?orderNumber=') }
+    };
+});
+
 module.exports = {
     ORDERLIST_JSON_OLD,
-    ORDERLIST_JSON_NEW
+    ORDERLIST_JSON_NEW,
+    ORDERLIST_JSON_ORDER_NUMBER
 };

@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.16';
+    const SCRIPT_VERSION = '9.18';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -367,13 +367,15 @@
     }
 
     // Дедупликация заказов по orderNumber: первый заказ сохраняется, дубли удаляются.
+    // Для карточек без номера (плитки завершённых заказов) ключом служит _domKey.
     // НЕ мутирует исходный массив — возвращает новый массив уникальных заказов.
     function dedupeOrders(orders) {
         const seen = new Set();
         const result = [];
         for (const o of orders || []) {
-            if (!seen.has(o.orderNumber)) {
-                seen.add(o.orderNumber);
+            const key = o.orderNumber || o._domKey || '';
+            if (!seen.has(key)) {
+                seen.add(key);
                 result.push(o);
             }
         }
@@ -1328,6 +1330,24 @@
 //   parseOrdersV2JSON, parseOrdersFromStateJSON, parseOrders.
 // ============================================================
     // ============================================================
+    // Извлекает номер заказа из ссылок Ozon обоих форматов:
+    //   ?order=58957649-0614       (старый)
+    //   ?orderNumber=58957649-0614 (актуальный)
+    // Никогда не бросает исключение: битая/неподходящая ссылка → ''.
+    function extractOrderNumberFromLink(link) {
+        if (!link) return '';
+        try {
+            const s = String(link);
+            const match = s.match(/[?&](?:orderNumber|order)=([^&#]+)/i);
+            if (!match) return '';
+            const value = decodeURIComponent(match[1]);
+            const number = value.match(/^\d+(?:-\d+)*/);
+            return number ? number[0] : '';
+        } catch(e) {
+            return '';
+        }
+    }
+
     // 5. ПАРСИНГ КАРТОЧКИ ЗАКАЗА
     // ============================================================
     function parseOrder(card) {
@@ -1337,10 +1357,9 @@
         // Диагностика: снимок сырых данных карточки (HTML + textContent)
         let _diagOrderNumber = '';
         try {
-            const _link = card.querySelector('a[href*="order="]');
+            const _link = card.querySelector('a[href*="order="], a[href*="orderNumber="]');
             if (_link) {
-                const _m = _link.href.match(/order=(\d+(?:-?\d+)?)/);
-                if (_m) _diagOrderNumber = _m[1];
+                _diagOrderNumber = extractOrderNumberFromLink(_link.href);
             }
             if (!_diagOrderNumber) {
                 const _nm = text.match(/(\d{5,}[-–]?\d*)/);
@@ -1353,10 +1372,9 @@
 
         // --- НОМЕР ЗАКАЗА ---
         let orderNumber = '';
-        const link = card.querySelector('a[href*="order="]');
+        const link = card.querySelector('a[href*="order="], a[href*="orderNumber="]');
         if (link) {
-            const match = link.href.match(/order=(\d+(?:-?\d+)?)/);
-            if (match) orderNumber = match[1];
+            orderNumber = extractOrderNumberFromLink(link.href);
         }
         if (!orderNumber) {
             const numMatch = text.match(/(\d{5,}[-–]?\d*)/);
@@ -1794,9 +1812,9 @@
             ].filter(Boolean);
             for (const lnk of linkCandidates) {
                 const s = String(lnk);
-                // Путь 1: обычная редирект-ссылка с ?order=
-                const mm = s.match(/order=(\d+(?:-?\d+)?)/);
-                if (mm) { orderNumber = mm[1]; break; }
+                // Путь 1: обычная редирект-ссылка (?order= или ?orderNumber=).
+                const linkedNumber = extractOrderNumberFromLink(s);
+                if (linkedNumber) { orderNumber = linkedNumber; break; }
                 // Путь 2: COMPOSER_ACTION с base64 data-параметром (мульти-отправление).
                 // Чистая логика вынесена в extractComposerAction (тестируется в F3).
                 const composerNumber = extractComposerAction(s);
@@ -2091,7 +2109,7 @@
                         'дата заказа не определена (statusText: ' + (order._statusText || '') + ')');
                 }
                 Diagnostics.logParseResult(order.orderNumber, 'JSON.orderNumber',
-                    'leftBlock.common.action.link → /order=/', order.orderNumber);
+                    'leftBlock.*.common.action.link → /order(Number)=/', order.orderNumber);
                 Diagnostics.logParseResult(order.orderNumber, 'JSON.deliveryStatus',
                     'leftBlock.textIcon.text.text → normalizeStatus', order.deliveryStatus);
                 Diagnostics.logParseResult(order.orderNumber, 'JSON.pickupPoint',
@@ -2117,20 +2135,17 @@
     // ============================================================
     // 6. ПАРСИНГ ВСЕХ ЗАКАЗОВ
     // ============================================================
-    // Стратегия (v9.11): JSON-first + структурный DOM-fallback.
+    // Стратегия (v9.18): JSON-first + объединение с видимыми DOM-карточками.
     //   1) JSON-first — извлекаем заказы из state-orderList.ordersV2.
     //      Не зависит от хэшей CSS-классов; работает всегда, когда
     //      Ozon рендерит страницу (а state-orderList рендерится всегда).
-    //   2) DOM-fallback — если JSON недоступен/пуст, ищем карточки в DOM.
+    //   2) DOM — если JSON недоступен/пуст, ищем карточки в DOM.
     //      Массив известных хэшей + структурный поиск по ссылкам → section.
-    function parseOrders() {
-        // === Уровень 1: JSON-first ===
-        const jsonOrders = parseOrdersFromStateJSON();
-        if (jsonOrders.length > 0) {
-            return jsonOrders;
-        }
-
-        // === Уровень 2: DOM-fallback (если JSON недоступен) ===
+    //   3) Объединение — JSON отдаёт не все видимые карточки (например,
+    //      завершённый заказ в списке «Актуальные»: он есть в DOM, но
+    //      отсутствует в ordersV2). Такие карточки дочитываем из DOM и
+    //      добавляем к JSON-заказам, дедуплицируя по номеру.
+    function parseOrdersFromDom() {
         // Массив известных хэшей контейнеров заказа (от новых к старым).
         // Ozon периодически меняет суффикс: dw8_11 → d9w_11 → w9d_11 → ...
         const CARD_SELECTORS = [
@@ -2146,62 +2161,204 @@
             cards = document.querySelectorAll(sel);
             if (cards.length > 0) break;
         }
+        const usedSelectors = cards.length > 0;
+        const containers = new Set(Array.from(cards));
 
-        // Структурный fallback: ищем по ссылкам на orderdetails,
-        // поднимаемся до ближайшего <section> (НЕ привязываемся к хэшу класса).
-        if (cards.length === 0) {
-            const allLinks = document.querySelectorAll('a[href*="/my/orderdetails/?order="], a[href*="order="]');
-            const seenContainers = new Set();
+        // Структурный поиск по ссылкам: нужен не только как fallback, но и
+        // как дополнение — карточка другого типа (например, завершённый заказ)
+        // может иметь иной хэш класса и не попасть под CARD_SELECTORS.
+        // Дубликаты не страшны: mergeOrdersByNumber отбросит повторные номера.
+        try {
+            const allLinks = document.querySelectorAll(
+                'a[href*="/my/orderdetails/?order="], ' +
+                'a[href*="/my/orderdetails/?orderNumber="], ' +
+                'a[href*="order="]'
+            );
             allLinks.forEach(a => {
                 // Поднимаемся до блока заказа: section → [data-widget] → контейнер с хэш-суффиксом
                 const container = a.closest('section')
                     || a.closest('[data-widget]')
                     || a.closest('[class*="_11"]');
-                if (container) seenContainers.add(container);
+                if (container) containers.add(container);
             });
-            if (seenContainers.size > 0) {
-                cards = Array.from(seenContainers);
-                console.log(`[Ozon Copier] DOM-fallback (структурный): найдено ${cards.length} контейнеров по ссылкам`);
-            }
-        }
+        } catch(e) {}
 
         // Последний fallback: старый контейнер .x3d_11
-        if (cards.length === 0) {
+        if (containers.size === 0) {
             const container = document.querySelector('.x3d_11');
             if (container) {
                 const items = container.querySelectorAll(':scope > div');
-                if (items.length > 0) {
-                    const orders = Array.from(items).map(parseOrder).filter(Boolean);
-                    const paymentGrid = extractPaymentFromOrderListJSON(items.length);
-                    orders.forEach((o, oi) => {
-                        if (paymentGrid[oi] && paymentGrid[oi].length > 0) {
-                            o.jsonPayment = paymentGrid[oi];
-                            const unique = [...new Set(paymentGrid[oi].map(v => v.status))];
-                            if (unique.length === 1 && !o.paymentStatus) o.paymentStatus = unique[0];
-                        }
-                    });
-                    return orders;
-                }
+                if (items.length > 0) Array.from(items).forEach(el => containers.add(el));
             }
-            console.warn('[Ozon Copier] Заказы не найдены ни в JSON, ни в DOM');
-            return [];
         }
 
-        const orders = Array.from(cards).map(parseOrder).filter(Boolean);
-        // Привязываем per-product статусы оплаты из глобального JSON
-        const paymentGrid = extractPaymentFromOrderListJSON(cards.length);
-        orders.forEach((o, oi) => {
-            // Если JSON дал per‑product статусы — кладём в order.jsonPayment
-            if (paymentGrid[oi] && paymentGrid[oi].length > 0) {
-                o.jsonPayment = paymentGrid[oi];
-                // Если все товары имеют один статус — используем как order-level, иначе order-level не трогаем
-                const unique = [...new Set(paymentGrid[oi].map(v => v.status))];
-                if (unique.length === 1 && !o.paymentStatus) {
-                    o.paymentStatus = unique[0];
-                }
-            }
+        // Дедупликация внутри DOM: один и тот же номер мог быть извлечён
+        // из вложенного контейнера-родителя и из самой карточки.
+        const seen = new Set();
+        const orders = [];
+        Array.from(containers).forEach(el => {
+            const order = parseOrder(el);
+            if (!order) return;
+            const key = order.orderNumber || order._domKey || '';
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+            orders.push(order);
         });
-        return orders;
+
+        // Плитки завершённых заказов без номера и без ссылки на детали.
+        // Ozon рендерит их на вкладке «Актуальные» отдельным виджетом.
+        try {
+            document.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
+                const partial = parseNumberlessOrder(el);
+                if (!partial || seen.has(partial._domKey)) return;
+                seen.add(partial._domKey);
+                orders.push(partial);
+            });
+        } catch(e) {
+            Diagnostics.logError('', 'parseOrdersFromDom.tiles', '', e);
+        }
+
+        // Позиционный маппинг jsonPayment (ordersV2[oi] ↔ cards[oi]) валиден,
+        // только если контейнеры пришли ровно из CARD_SELECTORS без добавок.
+        const paymentGridSafe = usedSelectors && containers.size === cards.length;
+        return { orders, paymentGridSafe };
+    }
+
+    // Карточка завершённого заказа в списке «Актуальные» может быть
+    // плиткой без ссылки на orderdetails и без номера заказа: Ozon не
+    // отдаёт номер ни в DOM, ни в state-orderList. Такие плитки нельзя
+    // обогатить деталями, но можно выгрузить частично (дата, статус,
+    // цены и фото товаров), чтобы заказ не пропадал из файла.
+    function parseNumberlessOrder(card) {
+        try {
+            const statusEl = card.querySelector('.tsHeadline550Medium');
+            const statusRaw = (statusEl?.textContent || '').trim();
+            if (!statusRaw) return null;
+            // Только завершённые/отменённые/возвратные плитки
+            if (!/^(получен|доставлен|отменён|отменен|возврат)/i.test(statusRaw)) return null;
+            // Если внутри есть ссылка на детали — это обычная карточка,
+            // её обработает parseOrder (номер заказа извлекается из ссылки).
+            if (card.querySelector('a[href*="orderdetails"], a[href*="order="], a[href*="orderNumber="]')) {
+                return null;
+            }
+
+            const status = normalizeStatus(statusRaw);
+            const date = parseRussianDate(statusRaw);
+
+            // Фото товаров (плитка показывает только изображения и цены)
+            const pictures = [];
+            const seenPics = new Set();
+            card.querySelectorAll('img').forEach(img => {
+                const url = img.currentSrc || img.src || img.getAttribute('src') || '';
+                if (!url || seenPics.has(url)) return;
+                if (!/(ozone\.ru|ozon\.ru)/i.test(url)) return;
+                seenPics.add(url);
+                pictures.push(url);
+            });
+
+            // Цены из плитки: "200,04 ₽", "846,56 ₽", ...
+            const prices = [];
+            card.querySelectorAll('.tsHeadline400Small').forEach(el => {
+                const t = (el.textContent || '').trim();
+                if (!t.includes('₽')) return;
+                const p = parsePrice(t);
+                if (p) prices.push(p);
+            });
+
+            const items = pictures.map((picture, i) => ({
+                name: '',
+                price: prices[i] || '',
+                qty: '',
+                shipmentStatus: status,
+                deliveryDate: date,
+                paymentStatus: '',
+                picture
+            }));
+
+            let total = 0;
+            items.forEach(it => {
+                const n = parseFloat(String(it.price || '').replace(',', '.'));
+                if (!isNaN(n)) total += n;
+            });
+
+            const order = {
+                orderNumber: '',
+                _domKey: 'tile:' + statusRaw + ':' + prices.join('|') + ':' + (pictures[0] || ''),
+                _partial: true,
+                _source: 'dom-tile',
+                date,
+                deliveryStatus: status,
+                items,
+                paymentStatus: '',
+                fallbackAmount: total > 0 ? formatAmount(total) : '',
+                pickupPoint: '',
+                cardDeliveryDate: date
+            };
+            Diagnostics.logParseResult('', 'DOM.partialOrder',
+                'плитка без № заказа: .tsHeadline550Medium + img + .tsHeadline400Small',
+                `${order.deliveryStatus} ${order.date}, товаров: ${items.length}, сумма: ${order.fallbackAmount || '—'}`);
+            return order;
+        } catch(e) {
+            Diagnostics.logError('', 'parseNumberlessOrder', '', e);
+            return null;
+        }
+    }
+
+    // Дедупликация и объединение: JSON-заказы приоритетны, из DOM
+    // добавляются только те номера, которых в JSON нет. Порядок —
+    // сначала JSON (как на странице), затем DOM-карточки.
+    function mergeOrdersByNumber(jsonOrders, domOrders) {
+        const seen = new Set((jsonOrders || []).map(o => o.orderNumber || o._domKey || ''));
+        const extra = [];
+        (domOrders || []).forEach(o => {
+            const key = o.orderNumber || o._domKey || '';
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+            extra.push(o);
+        });
+        return { merged: (jsonOrders || []).concat(extra), extra };
+    }
+
+    function parseOrders() {
+        // === Уровень 1: JSON-first ===
+        const jsonOrders = parseOrdersFromStateJSON();
+
+        // === Уровень 2: видимые карточки из DOM ===
+        const domResult = parseOrdersFromDom();
+        const domOrders = domResult.orders;
+
+        // Заказы, которых нет в ordersV2 (например, завершённый заказ
+        // в списке «Актуальные»), добавляем из DOM.
+        const { merged, extra } = mergeOrdersByNumber(jsonOrders, domOrders);
+
+        if (extra.length > 0) {
+            console.log(`[Ozon Copier] DOM дополнил JSON: ${extra.length} заказ(ов) — ` +
+                extra.map(o => o.orderNumber).join(', '));
+            Diagnostics.logParseResult('', 'DOM.extraOrders',
+                'карточки в DOM, отсутствующие в state-orderList.ordersV2',
+                extra.map(o => o.orderNumber).join(', '));
+        }
+
+        if (merged.length > 0) {
+            // Per-product статусы оплаты из JSON привязываются только в режиме
+            // чистого DOM-fallback (позиции карточек и ordersV2 совпадают).
+            if (jsonOrders.length === 0 && domResult.paymentGridSafe) {
+                const paymentGrid = extractPaymentFromOrderListJSON(merged.length);
+                merged.forEach((o, oi) => {
+                    if (paymentGrid[oi] && paymentGrid[oi].length > 0) {
+                        o.jsonPayment = paymentGrid[oi];
+                        const unique = [...new Set(paymentGrid[oi].map(v => v.status))];
+                        if (unique.length === 1 && !o.paymentStatus) {
+                            o.paymentStatus = unique[0];
+                        }
+                    }
+                });
+            }
+            return merged;
+        }
+
+        console.warn('[Ozon Copier] Заказы не найдены ни в JSON, ни в DOM');
+        return [];
     }
 // ============================================================
 // СЕКЦИЯ: src/core/fetch.js
@@ -2228,7 +2385,9 @@
     // Таймаут попытки — 5 с (реальный, через fetchWithTimeout: и заголовки, и чтение тела).
     async function fetchOrderDetailsOnce(orderNumber, signal) {
         try {
-            const url = `/my/orderdetails/?order=${orderNumber}`;
+            // Ozon сейчас использует orderNumber; старый order больше не
+            // открывает детали для ссылок из актуального state-orderList.
+            const url = `/my/orderdetails/?orderNumber=${encodeURIComponent(orderNumber)}`;
             const resp = await fetchWithTimeout(url, { ms: 5000, signal, credentials: 'include' });
             if (!resp.ok) {
                 // HTTP-ошибка → выбрасываем для retry в обёртке
@@ -2681,10 +2840,18 @@
         for (let i = 0; i < orders.length; i += CONCURRENCY) {
             const batch = orders.slice(i, i + CONCURRENCY);
             const results = await Promise.all(
-                batch.map(order => fetchOrderDetails(order.orderNumber, controller.signal))
+                batch.map(order => {
+                    // Плитки без номера заказа (завершённые в «Актуальных»)
+                    // нельзя обогатить: у них нет ссылки на orderdetails.
+                    // Их частичные items (фото/цены с карточки) сохраняем как есть.
+                    if (!order.orderNumber) return Promise.resolve(null);
+                    return fetchOrderDetails(order.orderNumber, controller.signal);
+                })
             );
             results.forEach((result, idx) => {
                 const order = orders[i + idx];
+                // null — заказ без номера, данные с карточки уже заполнены.
+                if (result === null) return;
                 const data = result || { items: [], address: '' };
                 const list = data.items || [];
                 // Ошибка загрузки деталей (таймаут/HTTP после retry) — пробрасываем заказу,
@@ -2835,7 +3002,7 @@
                 // очищаем «Кол-во», «Сумма» и «Статус оплаты».
                 const rowCancelled = isCancelled || displayStatus.includes('❌ Отменён');
                 const price = (hasItems && !rowCancelled) ? (item.price || '') : '';
-                const qty = rowCancelled ? '' : (item.qty || '1');
+                const qty = rowCancelled ? '' : (item.qty === '' ? '' : (item.qty || '1'));
                 const picture = item.picture || '';
                 // Дата доставки на КАЖДОЙ строке своего shipment (а не только idx===0)
                 const deliveryDateRaw = item.deliveryDate || o.cardDeliveryDate || '';
@@ -2987,7 +3154,7 @@
                     const n = parseFloat(v);
                     return isNaN(n) ? (item.price || '') : n;
                 })() : '';
-                const qtyNum = rowCancelled ? '' : (() => {
+                const qtyNum = (rowCancelled || o._partial) ? '' : (() => {
                     const n = parseInt(item.qty, 10);
                     return !isNaN(n) && n > 0 ? n : 1;
                 })();
@@ -3200,7 +3367,7 @@
             // ВСЕ подставляемые значения экранируем (XSS: <img onerror=...> в orderNumber/названии/цене)
             html += `<tr>
                 <td>
-                    <small><b>${escapeHtml(o.orderNumber)}</b></small>
+                    <small><b>${escapeHtml(o.orderNumber || (o._partial ? 'б/н' : ''))}</b></small>
                     ${previewName ? `<span class="product-name">${escapeHtml(previewName)}</span>` : ''}
                     ${moreCount > 0 ? `<span style="color:#999;font-size:11px;">+${escapeHtml(moreCount)} товаров</span>` : ''}
                 </td>
@@ -3360,7 +3527,7 @@
 
             // Шаг 4: Форматируем и копируем
             const tsv = formatTSV(deduped);
-            const ok = copyToClipboard(tsv);
+            const ok = await copyToClipboard(tsv);
 
             if (ok) {
                 btn.classList.remove('ozon-copy-btn--loading');
@@ -3561,7 +3728,7 @@
 
                 // Пробуем найти все ссылки на заказы и их родительскую иерархию
                 try {
-                    const orderLinks = document.querySelectorAll('a[href*="/my/orderdetails/?order="]');
+                    const orderLinks = document.querySelectorAll('a[href*="/my/orderdetails/?order="], a[href*="/my/orderdetails/?orderNumber="]');
                     const linkHints = [];
                     orderLinks.forEach((a, i) => {
                         if (i >= 10) return;
@@ -3578,7 +3745,7 @@
                             textSample: (a.textContent || '').trim().slice(0, 100)
                         });
                     });
-                    Diagnostics.logParseResult('[orderList]', 'a[href*="order="] parent chains',
+                    Diagnostics.logParseResult('[orderList]', 'order/orderNumber links parent chains',
                         'all order links with parent hierarchy', JSON.stringify(linkHints, null, 2));
                 } catch(e) {
                     Diagnostics.logError('', 'exportDiagnostics.orderLinks', '', e);
@@ -3788,7 +3955,7 @@
             // v9.10: отслеживаем новые селекторы карточек заказов
             const hasCards = document.querySelector('SECTION.d9w_11')
                 || document.querySelector('.w9d_11')
-                || document.querySelector('a[href*="/my/orderdetails/?order="]');
+                || document.querySelector('a[href*="/my/orderdetails/?order="], a[href*="/my/orderdetails/?orderNumber="]');
             // Флаг-дедупликация: если кнопки уже добавлены — addButton не вызываем.
             // НЕ используем disconnect(): после disconnect кнопки пропадут при SPA-переходах.
             if (!document.querySelector('.ozon-copy-btn') && hasCards) {

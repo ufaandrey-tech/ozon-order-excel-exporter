@@ -74,7 +74,7 @@
                 // очищаем «Кол-во», «Сумма» и «Статус оплаты».
                 const rowCancelled = isCancelled || displayStatus.includes('❌ Отменён');
                 const price = (hasItems && !rowCancelled) ? (item.price || '') : '';
-                const qty = rowCancelled ? '' : (item.qty || '1');
+                const qty = rowCancelled ? '' : (item.qty === '' ? '' : (item.qty || '1'));
                 const picture = item.picture || '';
                 // Дата доставки на КАЖДОЙ строке своего shipment (а не только idx===0)
                 const deliveryDateRaw = item.deliveryDate || o.cardDeliveryDate || '';

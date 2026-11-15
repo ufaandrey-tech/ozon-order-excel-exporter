@@ -60,13 +60,15 @@
     }
 
     // Дедупликация заказов по orderNumber: первый заказ сохраняется, дубли удаляются.
+    // Для карточек без номера (плитки завершённых заказов) ключом служит _domKey.
     // НЕ мутирует исходный массив — возвращает новый массив уникальных заказов.
     function dedupeOrders(orders) {
         const seen = new Set();
         const result = [];
         for (const o of orders || []) {
-            if (!seen.has(o.orderNumber)) {
-                seen.add(o.orderNumber);
+            const key = o.orderNumber || o._domKey || '';
+            if (!seen.has(key)) {
+                seen.add(key);
                 result.push(o);
             }
         }

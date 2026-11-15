@@ -97,7 +97,7 @@
                     const n = parseFloat(v);
                     return isNaN(n) ? (item.price || '') : n;
                 })() : '';
-                const qtyNum = rowCancelled ? '' : (() => {
+                const qtyNum = (rowCancelled || o._partial) ? '' : (() => {
                     const n = parseInt(item.qty, 10);
                     return !isNaN(n) && n > 0 ? n : 1;
                 })();

@@ -23,7 +23,9 @@
     // Таймаут попытки — 5 с (реальный, через fetchWithTimeout: и заголовки, и чтение тела).
     async function fetchOrderDetailsOnce(orderNumber, signal) {
         try {
-            const url = `/my/orderdetails/?order=${orderNumber}`;
+            // Ozon сейчас использует orderNumber; старый order больше не
+            // открывает детали для ссылок из актуального state-orderList.
+            const url = `/my/orderdetails/?orderNumber=${encodeURIComponent(orderNumber)}`;
             const resp = await fetchWithTimeout(url, { ms: 5000, signal, credentials: 'include' });
             if (!resp.ok) {
                 // HTTP-ошибка → выбрасываем для retry в обёртке
@@ -476,10 +478,18 @@
         for (let i = 0; i < orders.length; i += CONCURRENCY) {
             const batch = orders.slice(i, i + CONCURRENCY);
             const results = await Promise.all(
-                batch.map(order => fetchOrderDetails(order.orderNumber, controller.signal))
+                batch.map(order => {
+                    // Плитки без номера заказа (завершённые в «Актуальных»)
+                    // нельзя обогатить: у них нет ссылки на orderdetails.
+                    // Их частичные items (фото/цены с карточки) сохраняем как есть.
+                    if (!order.orderNumber) return Promise.resolve(null);
+                    return fetchOrderDetails(order.orderNumber, controller.signal);
+                })
             );
             results.forEach((result, idx) => {
                 const order = orders[i + idx];
+                // null — заказ без номера, данные с карточки уже заполнены.
+                if (result === null) return;
                 const data = result || { items: [], address: '' };
                 const list = data.items || [];
                 // Ошибка загрузки деталей (таймаут/HTTP после retry) — пробрасываем заказу,

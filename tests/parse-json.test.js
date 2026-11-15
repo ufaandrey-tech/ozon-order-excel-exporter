@@ -16,7 +16,8 @@ const assert = require('node:assert');
 const userScript = require('../dist/ozon-orders-copier.user.js');
 const {
     ORDERLIST_JSON_OLD,
-    ORDERLIST_JSON_NEW
+    ORDERLIST_JSON_NEW,
+    ORDERLIST_JSON_ORDER_NUMBER
 } = require('./fixtures/orderlist-json.js');
 
 const implementations = [
@@ -52,6 +53,16 @@ for (const { name, m } of implementations) {
         const orders = m.parseOrdersV2JSON(ORDERLIST_JSON_OLD.ordersV2);
         const inTransit = orders.find(o => o.orderNumber === '00000000-0001');
         assert.strictEqual(inTransit.paymentStatus, '✅ Оплачен');
+    });
+}
+
+// Регрессия для актуальных ссылок Ozon: ?orderNumber=...
+for (const { name, m } of implementations) {
+    test(`${name}: актуальная схема ссылок ?orderNumber= — заказы распознаются`, () => {
+        const orders = m.parseOrdersV2JSON(ORDERLIST_JSON_ORDER_NUMBER.ordersV2);
+        assert.strictEqual(orders.length, 2);
+        assert.strictEqual(orders[0].orderNumber, '00000000-0003');
+        assert.strictEqual(orders[1].orderNumber, '00000000-0004');
     });
 }
 

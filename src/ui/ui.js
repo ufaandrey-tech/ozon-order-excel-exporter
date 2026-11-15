@@ -73,7 +73,7 @@
             // ВСЕ подставляемые значения экранируем (XSS: <img onerror=...> в orderNumber/названии/цене)
             html += `<tr>
                 <td>
-                    <small><b>${escapeHtml(o.orderNumber)}</b></small>
+                    <small><b>${escapeHtml(o.orderNumber || (o._partial ? 'б/н' : ''))}</b></small>
                     ${previewName ? `<span class="product-name">${escapeHtml(previewName)}</span>` : ''}
                     ${moreCount > 0 ? `<span style="color:#999;font-size:11px;">+${escapeHtml(moreCount)} товаров</span>` : ''}
                 </td>
@@ -233,7 +233,7 @@
 
             // Шаг 4: Форматируем и копируем
             const tsv = formatTSV(deduped);
-            const ok = copyToClipboard(tsv);
+            const ok = await copyToClipboard(tsv);
 
             if (ok) {
                 btn.classList.remove('ozon-copy-btn--loading');
@@ -434,7 +434,7 @@
 
                 // Пробуем найти все ссылки на заказы и их родительскую иерархию
                 try {
-                    const orderLinks = document.querySelectorAll('a[href*="/my/orderdetails/?order="]');
+                    const orderLinks = document.querySelectorAll('a[href*="/my/orderdetails/?order="], a[href*="/my/orderdetails/?orderNumber="]');
                     const linkHints = [];
                     orderLinks.forEach((a, i) => {
                         if (i >= 10) return;
@@ -451,7 +451,7 @@
                             textSample: (a.textContent || '').trim().slice(0, 100)
                         });
                     });
-                    Diagnostics.logParseResult('[orderList]', 'a[href*="order="] parent chains',
+                    Diagnostics.logParseResult('[orderList]', 'order/orderNumber links parent chains',
                         'all order links with parent hierarchy', JSON.stringify(linkHints, null, 2));
                 } catch(e) {
                     Diagnostics.logError('', 'exportDiagnostics.orderLinks', '', e);
@@ -661,7 +661,7 @@
             // v9.10: отслеживаем новые селекторы карточек заказов
             const hasCards = document.querySelector('SECTION.d9w_11')
                 || document.querySelector('.w9d_11')
-                || document.querySelector('a[href*="/my/orderdetails/?order="]');
+                || document.querySelector('a[href*="/my/orderdetails/?order="], a[href*="/my/orderdetails/?orderNumber="]');
             // Флаг-дедупликация: если кнопки уже добавлены — addButton не вызываем.
             // НЕ используем disconnect(): после disconnect кнопки пропадут при SPA-переходах.
             if (!document.querySelector('.ozon-copy-btn') && hasCards) {
