@@ -1,16 +1,14 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.20 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.22 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.20
-// @description  Копирует заказы Ozon v9.20: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.22
+// @description  Копирует заказы Ozon v9.22: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
 // @icon         https://www.ozon.ru/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
-// @grant        GM_setClipboard
-// @grant        GM_addStyle
-// @grant        unsafeWindow
+// @grant        none
 // @connect      ir.ozone.ru
 // @connect      ir.ozon.ru
 // @connect      cdn1.ozon.ru
@@ -29,12 +27,14 @@
 // Источник: ozon-orders-copier.user.js
 //   - шапка ==UserScript== (строки 1–24) — без изменений;
 //   - открытие IIFE + 'use strict' (строки 26–27);
-//   - секция «1. СТИЛИ» (строки 29–254) — GM_addStyle;
-//   - copyToClipboard (строки 2381–2400) — GM_setClipboard + fallback.
+//   - секция «1. СТИЛИ» — внедрение <style> (без GM_addStyle);
+//   - copyToClipboard — navigator.clipboard + fallback (без GM_setClipboard).
+// Режим @grant none: скрипт выполняется в контексте страницы, поэтому
+// доступны React-свойства DOM-узлов (__reactFiber$ / __reactProps$).
 // Секции 1b (Diagnostics) и 1c (утилиты) из этого диапазона НЕ перенесены —
 // они уже в ядре (src/core/). IIFE НЕ закрывается (закроет build этапа 3).
-// Зависимости: GM_addStyle, GM_setClipboard (гранты Tampermonkey).
-// Объявляет: copyToClipboard (GM-версия); добавляет стили в DOM.
+// Зависимости: navigator.clipboard, document; ExcelJS — через @require.
+// Объявляет: copyToClipboard; добавляет стили в DOM.
 // ============================================================
 
 (function() {
@@ -45,7 +45,10 @@
     // ============================================================
     // В Node (node --test) document отсутствует — стили не добавляем.
     if (typeof document !== 'undefined') {
-    GM_addStyle(`
+    // @grant none: скрипт в контексте страницы, GM_addStyle недоступен —
+    // внедряем <style> вручную (как в расширении).
+    const styleEl = document.createElement('style');
+    styleEl.textContent = `
         .ozon-copy-btn {
             position: fixed !important;
             bottom: 24px !important;
@@ -264,7 +267,8 @@
             background: #f44336 !important;
             box-shadow: 0 4px 20px rgba(244, 67, 54, 0.4) !important;
         }
-    `);
+    `;
+    document.head.appendChild(styleEl);
     }
 
     // ============================================================
@@ -272,22 +276,25 @@
     // ============================================================
     function copyToClipboard(text) {
         try {
-            GM_setClipboard(text, 'text');
-            return true;
+            return navigator.clipboard.writeText(text).then(() => true).catch(() => legacyCopy(text));
         } catch(e) {
-            try {
-                const ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.position = 'fixed';
-                ta.style.left = '-9999px';
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-                return true;
-            } catch(e2) {
-                return false;
-            }
+            return Promise.resolve(legacyCopy(text));
+        }
+    }
+
+    function legacyCopy(text) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            return true;
+        } catch(e2) {
+            return false;
         }
     }
 // ============================================================
@@ -305,7 +312,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.20';
+    const SCRIPT_VERSION = '9.22';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -2403,6 +2410,125 @@
         }
     }
 
+    // Собирает заказы из ВСЕХ state-* элементов страницы. Ozon может держать
+    // отдельные виджеты для разных блоков, а не только первый state-orderList.
+    // Ищем ordersV2 и любые объекты с leftBlock/rightBlock внутри data-state.
+    function harvestOrdersFromStates() {
+        const found = [];
+        try {
+            const els = document.querySelectorAll('[id^="state-"]');
+            els.forEach(el => {
+                let raw = '';
+                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
+                if (!raw || raw.length < 40) return;
+                if (raw.indexOf('orderdetails') < 0 && raw.indexOf('ordersV2') < 0) return;
+                let json;
+                try { json = JSON.parse(raw); } catch(e) { return; }
+
+                if (Array.isArray(json?.ordersV2)) {
+                    parseOrdersV2JSON(json.ordersV2).forEach(o => found.push(o));
+                }
+
+                const visited = new Set();
+                let budget = 2000;
+                const walk = (v, depth) => {
+                    if (budget <= 0 || depth > 12 || !v || typeof v !== 'object') return;
+                    if (visited.has(v)) return;
+                    visited.add(v);
+                    budget--;
+                    if (v.leftBlock && v.rightBlock) {
+                        try {
+                            parseOrdersV2JSON([v]).forEach(o => found.push(o));
+                        } catch(e) {}
+                    }
+                    const keys = Array.isArray(v) ? v.keys() : Object.keys(v);
+                    for (const k of keys) {
+                        try { walk(v[k], depth + 1); } catch(e) {}
+                    }
+                };
+                walk(json, 0);
+            });
+        } catch(e) {
+            Diagnostics.logError('', 'harvestOrdersFromStates', '', e);
+        }
+        return found;
+    }
+
+    function sumOrderItems(order) {
+        let total = 0;
+        (order.items || []).forEach(it => {
+            const n = parseFloat(String(it.price || '').replace(',', '.'));
+            if (!isNaN(n)) total += n;
+        });
+        return total;
+    }
+
+    // Заполняет частичную плитку данными из state-* по совпадению даты
+    // (и ближайшей суммы). Ничего не кликает и не меняет страницу.
+    function fillPartialOrdersFromStates(domOrders, harvested) {
+        const used = new Set();
+        let matched = 0;
+        (domOrders || []).forEach(tile => {
+            if (!tile._partial) return;
+            const tileSum = sumOrderItems(tile);
+            let best = null;
+            let bestDiff = Infinity;
+            (harvested || []).forEach(h => {
+                if (!h.orderNumber || used.has(h.orderNumber)) return;
+                const hDate = h.cardDeliveryDate || h.date || '';
+                if (!hDate || hDate !== tile.date) return;
+                const diff = Math.abs(sumOrderItems(h) - tileSum);
+                if (diff < bestDiff) { best = h; bestDiff = diff; }
+            });
+            if (!best) return;
+            used.add(best.orderNumber);
+            matched++;
+
+            tile.orderNumber = best.orderNumber;
+            tile._partial = false;
+            tile._source = 'state-harvest';
+            tile.date = tile.date || best.date;
+            tile.deliveryStatus = best.deliveryStatus || tile.deliveryStatus;
+            tile.pickupPoint = best.pickupPoint || '';
+            tile.paymentStatus = best.paymentStatus || '';
+            tile.fallbackAmount = best.fallbackAmount || tile.fallbackAmount;
+            if (best.items && best.items.length > 0) {
+                tile.items = best.items.map(it => Object.assign({}, it));
+            }
+            Diagnostics.logParseResult(best.orderNumber, 'DOM.stateHarvest',
+                'state-*: совпадение плитки по дате + сумме',
+                `${best.orderNumber}, ${best.cardDeliveryDate || best.date}, сумма ${best.fallbackAmount || '—'}`);
+        });
+        return matched;
+    }
+
+    function logStateInventory(partialDate) {
+        if (!Diagnostics.enabled) return;
+        try {
+            const inventory = [];
+            document.querySelectorAll('[id^="state-"]').forEach(el => {
+                if (inventory.length >= 25) return;
+                let raw = '';
+                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
+                if (!raw || raw.length < 40) return;
+                const hasLink = raw.indexOf('orderdetails') >= 0;
+                if (!hasLink && raw.indexOf('ordersV2') < 0) return;
+                inventory.push({
+                    id: (el.id || '').slice(0, 80),
+                    widget: (el.getAttribute('data-widget') || '').slice(0, 40),
+                    length: raw.length,
+                    hasOrderLink: hasLink
+                });
+            });
+            Diagnostics.logParseResult('', 'DOM.stateInventory',
+                'state-* с orderdetails/ordersV2 (id, widget, длина, есть ссылка)',
+                JSON.stringify(inventory));
+            Diagnostics.logParseResult('', 'DOM.partialDate', 'дата частичной плитки', partialDate || '');
+        } catch(e) {
+            Diagnostics.logError('', 'logStateInventory', '', e);
+        }
+    }
+
     // Дедупликация и объединение: JSON-заказы приоритетны, из DOM
     // добавляются только те номера, которых в JSON нет. Порядок —
     // сначала JSON (как на странице), затем DOM-карточки.
@@ -2425,6 +2551,23 @@
         // === Уровень 2: видимые карточки из DOM ===
         const domResult = parseOrdersFromDom();
         const domOrders = domResult.orders;
+
+        // === Уровень 3: сбор заказов из всех state-* элементов ===
+        // Сопоставляем «безымянные» плитки по дате и сумме. Без кликов.
+        try {
+            const harvested = harvestOrdersFromStates();
+            if (harvested.length > 0) {
+                const matched = fillPartialOrdersFromStates(domOrders, harvested);
+                if (matched > 0) {
+                    console.log(`[Ozon Copier] state-*: сопоставлено плиток — ${matched}`);
+                }
+            }
+            if (domOrders.some(o => o._partial)) {
+                logStateInventory((domOrders.find(o => o._partial) || {}).date);
+            }
+        } catch(e) {
+            Diagnostics.logError('', 'parseOrders.harvest', '', e);
+        }
 
         // Заказы, которых нет в ordersV2 (например, завершённый заказ
         // в списке «Актуальные»), добавляем из DOM.

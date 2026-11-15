@@ -8,9 +8,7 @@
 // @match        https://ozon.ru/my/orderlist*
 // @icon         https://www.ozon.ru/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
-// @grant        GM_setClipboard
-// @grant        GM_addStyle
-// @grant        unsafeWindow
+// @grant        none
 // @connect      ir.ozone.ru
 // @connect      ir.ozon.ru
 // @connect      cdn1.ozon.ru
@@ -29,12 +27,14 @@
 // Источник: ozon-orders-copier.user.js
 //   - шапка ==UserScript== (строки 1–24) — без изменений;
 //   - открытие IIFE + 'use strict' (строки 26–27);
-//   - секция «1. СТИЛИ» (строки 29–254) — GM_addStyle;
-//   - copyToClipboard (строки 2381–2400) — GM_setClipboard + fallback.
+//   - секция «1. СТИЛИ» — внедрение <style> (без GM_addStyle);
+//   - copyToClipboard — navigator.clipboard + fallback (без GM_setClipboard).
+// Режим @grant none: скрипт выполняется в контексте страницы, поэтому
+// доступны React-свойства DOM-узлов (__reactFiber$ / __reactProps$).
 // Секции 1b (Diagnostics) и 1c (утилиты) из этого диапазона НЕ перенесены —
 // они уже в ядре (src/core/). IIFE НЕ закрывается (закроет build этапа 3).
-// Зависимости: GM_addStyle, GM_setClipboard (гранты Tampermonkey).
-// Объявляет: copyToClipboard (GM-версия); добавляет стили в DOM.
+// Зависимости: navigator.clipboard, document; ExcelJS — через @require.
+// Объявляет: copyToClipboard; добавляет стили в DOM.
 // ============================================================
 
 (function() {
@@ -45,7 +45,10 @@
     // ============================================================
     // В Node (node --test) document отсутствует — стили не добавляем.
     if (typeof document !== 'undefined') {
-    GM_addStyle(`
+    // @grant none: скрипт в контексте страницы, GM_addStyle недоступен —
+    // внедряем <style> вручную (как в расширении).
+    const styleEl = document.createElement('style');
+    styleEl.textContent = `
         .ozon-copy-btn {
             position: fixed !important;
             bottom: 24px !important;
@@ -264,7 +267,8 @@
             background: #f44336 !important;
             box-shadow: 0 4px 20px rgba(244, 67, 54, 0.4) !important;
         }
-    `);
+    `;
+    document.head.appendChild(styleEl);
     }
 
     // ============================================================
@@ -272,21 +276,24 @@
     // ============================================================
     function copyToClipboard(text) {
         try {
-            GM_setClipboard(text, 'text');
-            return true;
+            return navigator.clipboard.writeText(text).then(() => true).catch(() => legacyCopy(text));
         } catch(e) {
-            try {
-                const ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.position = 'fixed';
-                ta.style.left = '-9999px';
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-                return true;
-            } catch(e2) {
-                return false;
-            }
+            return Promise.resolve(legacyCopy(text));
+        }
+    }
+
+    function legacyCopy(text) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            return true;
+        } catch(e2) {
+            return false;
         }
     }
