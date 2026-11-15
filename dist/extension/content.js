@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.22';
+    const SCRIPT_VERSION = '9.23';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -2230,9 +2230,9 @@
     // Карточка завершённого заказа в списке «Актуальные» может быть
     // плиткой без ссылки на orderdetails и без номера заказа: Ozon не
     // отдаёт номер ни в DOM, ни в state-orderList. Плитка кликабельна,
-    // и ссылка на заказ обычно лежит в React-пропсах (Link/action.link).
-    // Достаём её обходом fiber-дерева — без клика и перехода. Если не
-    // получилось — выгружаем частично (дата, статус, цены и фото).
+    // и ссылка на заказ лежит в JS-пропсах компонента (страница на Vue,
+    // поэтому основные ключи — __vueParentComponent / __vnode; React-ключи
+    // проверяем для совместимости). Достаём номер без клика.
     function scanPropsForOrderLink(props, depth, budget) {
         if (!props || depth > 6 || budget.left <= 0) return '';
         const type = typeof props;
@@ -2252,11 +2252,18 @@
         for (const k of keys) {
             if (budget.left <= 0) break;
             if (k === 'stateNode' || k === 'return' || k === 'child' || k === 'sibling'
-                || k === 'alternate' || k === '_owner' || k === 'ref') continue;
+                || k === 'alternate' || k === '_owner' || k === 'ref'
+                || k === 'parent' || k === 'appContext' || k === 'provides'
+                || k === 'root' || k === 'router' || k === 'store') continue;
             budget.left--;
             let v;
             try { v = props[k]; } catch(e) { continue; }
             if (typeof v === 'function') continue;
+            // Прямое поле с номером заказа (orderNumber / number / orderId …)
+            if (typeof v === 'string' && /^(order(number|id)?|number|posting(number)?|id)$/i.test(k)) {
+                const direct = v.match(/\d{5,}(?:-\d+)+/);
+                if (direct) return direct[0];
+            }
             const found = scanPropsForOrderLink(v, depth + 1, budget);
             if (found) return found;
         }
@@ -2311,6 +2318,36 @@
         return '';
     }
 
+    // Ищет номер заказа в Vue-инстансах плитки и ближайших родителей.
+    // Vue хранит инстанс компонента на его DOM-узле: __vueParentComponent
+    // (Vue 3), __vue__ (Vue 2), __vnode / _vnode. Смотрим props/ctx/setupState.
+    function findOrderNumberInVueProps(el) {
+        try {
+            let node = el;
+            for (let domDepth = 0; node && domDepth < 6; domDepth++, node = node.parentElement) {
+                let keys;
+                try { keys = Object.keys(node); } catch(e) { continue; }
+                const vueKeys = keys.filter(k => k.startsWith('__vue')
+                    || k === '_vnode' || k === '__vnode' || k === '__vue_app__');
+                for (const vk of vueKeys) {
+                    let inst;
+                    try { inst = node[vk]; } catch(e) { continue; }
+                    if (!inst || typeof inst !== 'object') continue;
+                    const roots = [
+                        inst, inst.props, inst.vnode, inst.ctx, inst.setupState,
+                        inst.data, inst.$props, inst.$data, inst.$
+                    ];
+                    for (const root of roots) {
+                        const budget = { left: 800, seen: new Set() };
+                        const num = scanPropsForOrderLink(root, 0, budget);
+                        if (num) return num;
+                    }
+                }
+            }
+        } catch(e) {}
+        return '';
+    }
+
     function parseNumberlessOrder(card) {
         try {
             const statusEl = card.querySelector('.tsHeadline550Medium');
@@ -2327,8 +2364,11 @@
             const status = normalizeStatus(statusRaw);
             const date = parseRussianDate(statusRaw);
 
-            // Номер заказа из React-пропсов кликабельной плитки.
-            const reactOrderNumber = findOrderNumberInReactProps(card);
+            // Номер заказа из JS-пропсов кликабельной плитки: сначала Vue
+            // (Ozon на Vue), затем React (совместимость).
+            const vueOrderNumber = findOrderNumberInVueProps(card);
+            const reactOrderNumber = vueOrderNumber ? '' : findOrderNumberInReactProps(card);
+            const propsOrderNumber = vueOrderNumber || reactOrderNumber;
 
             // Фото товаров (плитка показывает только изображения и цены)
             const pictures = [];
@@ -2367,10 +2407,10 @@
             });
 
             const order = {
-                orderNumber: reactOrderNumber || '',
+                orderNumber: propsOrderNumber || '',
                 _domKey: 'tile:' + statusRaw + ':' + prices.join('|') + ':' + (pictures[0] || ''),
-                _partial: !reactOrderNumber,
-                _source: reactOrderNumber ? 'dom-tile-react' : 'dom-tile',
+                _partial: !propsOrderNumber,
+                _source: propsOrderNumber ? (vueOrderNumber ? 'dom-tile-vue' : 'dom-tile-react') : 'dom-tile',
                 date,
                 deliveryStatus: status,
                 items,
@@ -2379,20 +2419,29 @@
                 pickupPoint: '',
                 cardDeliveryDate: date
             };
-            if (reactOrderNumber) {
-                Diagnostics.logParseResult(reactOrderNumber, 'DOM.reactOrderNumber',
-                    'кликабельная плитка: __reactFiber__.__reactProps__ → orderNumber',
-                    reactOrderNumber);
+            if (propsOrderNumber) {
+                Diagnostics.logParseResult(propsOrderNumber,
+                    vueOrderNumber ? 'DOM.vueOrderNumber' : 'DOM.reactOrderNumber',
+                    vueOrderNumber
+                        ? 'кликабельная плитка: __vueParentComponent/__vnode → orderNumber'
+                        : 'кликабельная плитка: __reactFiber__/__reactProps__ → orderNumber',
+                    propsOrderNumber);
             } else {
                 let hasReact = false;
+                let vueAt = -1;
                 try {
                     hasReact = Object.keys(card).some(k => k.startsWith('__reactFiber$')
                         || k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance$'));
+                    let n = card;
+                    for (let d = 0; n && d < 6; d++, n = n.parentElement) {
+                        if (Object.keys(n).some(k => k.startsWith('__vue') || k === '_vnode')) {
+                            vueAt = d;
+                            break;
+                        }
+                    }
                 } catch(e) {}
-                let world = 'sandbox';
-                try { if (getPageDocument() !== document) world = 'page'; } catch(e) {}
                 Diagnostics.logParseResult('', 'DOM.partialOrder',
-                    `плитка без № заказа (React-пропсы: ${hasReact ? 'есть, ссылка не найдена' : 'нет'}; мир: ${world})`,
+                    `плитка без № (React: ${hasReact ? 'есть' : 'нет'}; Vue: ${vueAt >= 0 ? 'есть, уровень ' + vueAt : 'нет'})`,
                     `${order.deliveryStatus} ${order.date}, товаров: ${items.length}, сумма: ${order.fallbackAmount || '—'}`);
             }
             return order;
