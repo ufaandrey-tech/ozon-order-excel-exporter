@@ -10,6 +10,7 @@
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
 // @grant        GM_setClipboard
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @connect      ir.ozone.ru
 // @connect      ir.ozon.ru
 // @connect      cdn1.ozon.ru

@@ -893,8 +893,11 @@
 
         // Плитки завершённых заказов без номера и без ссылки на детали.
         // Ozon рендерит их на вкладке «Актуальные» отдельным виджетом.
+        // Сканируем страничный документ (unsafeWindow), иначе React-пропсы
+        // плитки не видны из песочницы userscript.
         try {
-            document.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
+            const pageDoc = getPageDocument();
+            pageDoc.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
                 const partial = parseNumberlessOrder(el);
                 if (!partial || seen.has(partial._domKey)) return;
                 seen.add(partial._domKey);
@@ -944,6 +947,20 @@
             if (found) return found;
         }
         return '';
+    }
+
+    // Документ страничного мира. Tampermonkey выполняет скрипт в песочнице,
+    // поэтому React-свойства DOM-узлов (__reactFiber$ / __reactProps$) из
+    // песочницы не видны — их нужно читать через unsafeWindow.document.
+    // В расширении unsafeWindow нет — используется обычный document.
+    function getPageDocument() {
+        try {
+            if (typeof unsafeWindow !== 'undefined' && unsafeWindow
+                && unsafeWindow.document && unsafeWindow.document !== document) {
+                return unsafeWindow.document;
+            }
+        } catch(e) {}
+        return document;
     }
 
     // Ищет номер заказа в React-пропсах самой плитки и ближайших родителей.
@@ -1058,8 +1075,10 @@
                     hasReact = Object.keys(card).some(k => k.startsWith('__reactFiber$')
                         || k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance$'));
                 } catch(e) {}
+                let world = 'sandbox';
+                try { if (getPageDocument() !== document) world = 'page'; } catch(e) {}
                 Diagnostics.logParseResult('', 'DOM.partialOrder',
-                    `плитка без № заказа (React-пропсы: ${hasReact ? 'есть, ссылка не найдена' : 'нет'})`,
+                    `плитка без № заказа (React-пропсы: ${hasReact ? 'есть, ссылка не найдена' : 'нет'}; мир: ${world})`,
                     `${order.deliveryStatus} ${order.date}, товаров: ${items.length}, сумма: ${order.fallbackAmount || '—'}`);
             }
             return order;
