@@ -187,7 +187,7 @@ for (const { name, m } of implementations) {
         assert.strictEqual(firstLine, HEADERS_10.join('\t'));
     });
 
-    test(`${name}: B1/B2 formatTSV — multi-item заказ: дата только в первой строке`, () => {
+    test(`${name}: B1/B2 formatTSV — multi-item заказ: дата и номер на каждой строке`, () => {
         const orders = [{
             orderNumber: '12345678-0001',
             date: '06.07.2026',
@@ -213,10 +213,10 @@ for (const { name, m } of implementations) {
         assert.strictEqual(row1[3], 'Товар A');
         assert.strictEqual(row1[4], '1');
         assert.strictEqual(row1[5], '100');
-        // Строка 2 (второй товар): дата и номер пустые
+        // Строка 2 (второй товар): дата и номер повторяются
         const row2 = lines[2].split('\t');
-        assert.strictEqual(row2[0], '');
-        assert.strictEqual(row2[1], '');
+        assert.strictEqual(row2[0], '06.07.2026');
+        assert.strictEqual(row2[1], '12345678-0001');
         assert.strictEqual(row2[3], 'Товар B');
         assert.strictEqual(row2[4], '2');
         assert.strictEqual(row2[5], '50,50');
@@ -412,6 +412,12 @@ for (const { name, m } of implementations) {
     test(`${name}: parseRussianDate — «Получен 6 июля» из статуса`, () => {
         const out = m.parseRussianDate('Получен 6 июля');
         assert.match(out, /^06\.07\.\d{4}$/);
+    });
+
+    test(`${name}: parseRussianDate — окно доставки не даёт дату заказа`, () => {
+        assert.strictEqual(m.parseRussianDate('Доставим 17 – 18 ноября'), '');
+        assert.strictEqual(m.parseRussianDate('Доставим 20 ноя – 2 дек'), '');
+        assert.strictEqual(m.parseRussianDate('Ожидаем 15 июля'), '');
     });
 }
 

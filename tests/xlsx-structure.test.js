@@ -208,5 +208,36 @@ for (const { name, m } of implementations) {
         assert.ok(Array.isArray(trace.columns), 'ws.columns должен быть массивом');
         assert.strictEqual(trace.columns.length, 10);
         assert.strictEqual(trace.columns[0].width, 14);
+        assert.strictEqual(trace.columns[7].width, 50, 'адрес ПВЗ (H) должен быть шире');
+    });
+
+    test(`${name}: F4 buildXlsxWorkbook — дата и номер заказа на каждой строке товара`, () => {
+        const orders = [{
+            orderNumber: '12345678-0001',
+            date: '06.07.2026',
+            deliveryStatus: '✅ Доставлен',
+            pickupPoint: 'Пункт Ozon, Адрес 1',
+            cardDeliveryDate: '',
+            paymentStatus: '✅ Оплачен',
+            fallbackAmount: '',
+            error: '',
+            items: [
+                { name: 'Товар A', price: '100', qty: '1', shipmentStatus: '✅ Доставлен', deliveryDate: '17.07.2026', paymentStatus: '✅ Оплачен', picture: '' },
+                { name: 'Товар B', price: '50', qty: '1', shipmentStatus: '✅ Доставлен', deliveryDate: '17.07.2026', paymentStatus: '✅ Оплачен', picture: '' }
+            ]
+        }];
+        const { ExcelJS, trace } = createExcelJsStub();
+        const prev = global.ExcelJS;
+        global.ExcelJS = ExcelJS;
+        try {
+            m.buildXlsxWorkbook(orders, new Map(), ExcelJS);
+        } finally {
+            global.ExcelJS = prev;
+        }
+        // Первый товар — строка 2, второй — строка 3
+        assert.strictEqual(trace.cells['2,1'].value, '06.07.2026');
+        assert.strictEqual(trace.cells['2,2'].value, '12345678-0001');
+        assert.strictEqual(trace.cells['3,1'].value, '06.07.2026');
+        assert.strictEqual(trace.cells['3,2'].value, '12345678-0001');
     });
 }

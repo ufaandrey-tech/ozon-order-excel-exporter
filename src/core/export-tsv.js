@@ -86,33 +86,19 @@
 
                 // safeCell защищает строковые ячейки от формульной инъекции
                 // (= + - @ в начале). Числовые qty/price и пустые — без изменений.
-                if (idx === 0) {
-                    tsv += [
-                        safeCell(o.date), // A: Дата заказа
-                        safeCell(o.orderNumber), // B: № Заказа
-                        safeCell(displayStatus), // C: Статус доставки
-                        safeCell(name), // D: Товары
-                        qty, // E: Кол-во
-                        price, // F: Сумма
-                        safeCell(pay), // G: Статус оплаты (item-level)
-                        safeCell(o.pickupPoint), // H: Пункт выдачи
-                        safeCell(deliveryDate), // I: Дата доставки (по shipment)
-                        safeCell(picture) // J: Фото
-                    ].join(sep) + '\n';
-                } else {
-                    tsv += [
-                        '',
-                        '',
-                        safeCell(displayStatus),
-                        safeCell(name),
-                        qty,
-                        price,
-                        safeCell(pay),
-                        safeCell(o.pickupPoint),
-                        safeCell(deliveryDate),
-                        safeCell(picture)
-                    ].join(sep) + '\n';
-                }
+                // Дата и номер заказа — на КАЖДОЙ строке товара (как в XLSX).
+                tsv += [
+                    safeCell(o.date), // A: Дата заказа
+                    safeCell(o.orderNumber), // B: № Заказа
+                    safeCell(displayStatus), // C: Статус доставки
+                    safeCell(name), // D: Товары
+                    qty, // E: Кол-во
+                    price, // F: Сумма
+                    safeCell(pay), // G: Статус оплаты (item-level)
+                    safeCell(o.pickupPoint), // H: Пункт выдачи
+                    safeCell(deliveryDate), // I: Дата доставки (по shipment)
+                    safeCell(picture) // J: Фото
+                ].join(sep) + '\n';
                 totalRows++;
             });
         });

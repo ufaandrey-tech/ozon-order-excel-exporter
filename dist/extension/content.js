@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.41';
+    const SCRIPT_VERSION = '9.42';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -577,8 +577,16 @@
         return `${d}.${month}.${year}`;
     }
 
+    // Статусы «Доставим 17 – 18 ноября» / «Ожидаем 15 июля» содержат дату
+    // БУДУЩЕГО события доставки, а не дату заказа/получения. Иначе окно
+    // доставки попадает в «Дата заказа» (см. баг v9.27: заказ 0146 → 18.11).
+    function isUpcomingDeliveryText(text) {
+        return /доставим|ожидаем|ожидаемая|ожидается|прибудет|курьер/i.test(String(text || ''));
+    }
+
     function parseRussianDate(text) {
         if (!text) return '';
+        if (isUpcomingDeliveryText(text)) return '';
         // Только явная дата в статусе вида "Получен 6 июля" / "6 июля" —
         // НЕ использовать для всего текста карточки (там «хранится до…»).
         const m = text.match(new RegExp(
@@ -3436,33 +3444,19 @@
 
                 // safeCell защищает строковые ячейки от формульной инъекции
                 // (= + - @ в начале). Числовые qty/price и пустые — без изменений.
-                if (idx === 0) {
-                    tsv += [
-                        safeCell(o.date), // A: Дата заказа
-                        safeCell(o.orderNumber), // B: № Заказа
-                        safeCell(displayStatus), // C: Статус доставки
-                        safeCell(name), // D: Товары
-                        qty, // E: Кол-во
-                        price, // F: Сумма
-                        safeCell(pay), // G: Статус оплаты (item-level)
-                        safeCell(o.pickupPoint), // H: Пункт выдачи
-                        safeCell(deliveryDate), // I: Дата доставки (по shipment)
-                        safeCell(picture) // J: Фото
-                    ].join(sep) + '\n';
-                } else {
-                    tsv += [
-                        '',
-                        '',
-                        safeCell(displayStatus),
-                        safeCell(name),
-                        qty,
-                        price,
-                        safeCell(pay),
-                        safeCell(o.pickupPoint),
-                        safeCell(deliveryDate),
-                        safeCell(picture)
-                    ].join(sep) + '\n';
-                }
+                // Дата и номер заказа — на КАЖДОЙ строке товара (как в XLSX).
+                tsv += [
+                    safeCell(o.date), // A: Дата заказа
+                    safeCell(o.orderNumber), // B: № Заказа
+                    safeCell(displayStatus), // C: Статус доставки
+                    safeCell(name), // D: Товары
+                    qty, // E: Кол-во
+                    price, // F: Сумма
+                    safeCell(pay), // G: Статус оплаты (item-level)
+                    safeCell(o.pickupPoint), // H: Пункт выдачи
+                    safeCell(deliveryDate), // I: Дата доставки (по shipment)
+                    safeCell(picture) // J: Фото
+                ].join(sep) + '\n';
                 totalRows++;
             });
         });
@@ -3525,7 +3519,7 @@
             };
         });
 
-        // Ширина колонок (A: 14 — дата заказа)
+        // Ширина колонок (A: 14 — дата заказа, H: 50 — длинные адреса ПВЗ)
         ws.columns = [
             { width: 14 }, // A: Дата заказа
             { width: 20 }, // B: № Заказа
@@ -3534,7 +3528,7 @@
             { width: 22 }, // E: Кол-во
             { width: 13 }, // F: Сумма
             { width: 22 }, // G: Статус оплаты
-            { width: 28 }, // H: Пункт выдачи
+            { width: 50 }, // H: Пункт выдачи
             { width: 18 }, // I: Дата доставки (диапазоны 17–18.07.2026)
             { width: 18 }  // J: Фото
         ];
@@ -3590,10 +3584,11 @@
 
                 // safeCell защищает строковые ячейки от формульной инъекции
                 // (= + - @ в начале). Числовые qtyNum/price остаются числами.
-                if (idx === 0) {
-                    ws.getCell(row, 1).value = safeCell(o.date); // A: Дата заказа
-                    ws.getCell(row, 2).value = safeCell(o.orderNumber); // B: № Заказа
-                }
+                // Дата и номер заказа — на КАЖДОЙ строке товара: иначе в
+                // многотоварных заказах строки 3+ выглядят «пустыми» и
+                // выпадают из автофильтра/сортировки.
+                ws.getCell(row, 1).value = safeCell(o.date); // A: Дата заказа
+                ws.getCell(row, 2).value = safeCell(o.orderNumber); // B: № Заказа
 
                 ws.getCell(row, 3).value = safeCell(displayStatus); // C: Статус доставки
                 ws.getCell(row, 4).value = safeCell(name); // D: Товары
