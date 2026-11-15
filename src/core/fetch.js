@@ -471,9 +471,108 @@
         return { items: [], address: '', error: 'таймаут загрузки деталей заказа' };
     }
 
+    // ============================================================
+    // 7d. ПОИСК НОМЕРА ПЛИТКИ ПО HTML СПИСКА ЗАКАЗОВ
+    // ============================================================
+    // Плитка завершённого заказа не содержит номера. Но тот же заказ есть
+    // в списке (SSR/архив), где у карточек бывают ссылки. Подтягиваем HTML
+    // списка и ищем карточку по ID фотографий товаров (надёжнее даты).
+    const listDocCache = new Map();
+
+    async function getListDocument(tab) {
+        if (listDocCache.has(tab)) return listDocCache.get(tab);
+        const promise = (async () => {
+            try {
+                const url = tab === 'archive'
+                    ? '/my/orderlist?selectedTab=archive'
+                    : '/my/orderlist?selectedTab=active';
+                const resp = await fetchWithTimeout(url, { ms: 20000, credentials: 'include' });
+                if (!resp.ok) return null;
+                const html = await resp.text();
+                return new DOMParser().parseFromString(html, 'text/html');
+            } catch(e) {
+                return null;
+            }
+        })();
+        listDocCache.set(tab, promise);
+        return promise;
+    }
+
+    function imageIdFromUrl(url) {
+        const m = String(url || '').match(/\/(\d{6,})(?:\.(?:jpe?g|png|webp))?(?:[?#]|$)/i)
+            || String(url || '').match(/\/(\d{6,})\//);
+        return m ? m[1] : '';
+    }
+
+    function monthNameRu(month) {
+        const names = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+            'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+        return names[month - 1] || '';
+    }
+
+    async function resolveTileFromListPages(order) {
+        const pictures = (order.items || []).map(it => it.picture).filter(Boolean);
+        const imageIds = pictures.map(imageIdFromUrl).filter(Boolean);
+        const dateMatch = String(order.date || '').match(/^(\d{1,2})\.(\d{2})\.(\d{4})$/);
+        const dayNum = dateMatch ? parseInt(dateMatch[1], 10) : 0;
+        const monthRu = dateMatch ? monthNameRu(parseInt(dateMatch[2], 10)) : '';
+
+        for (const tab of ['archive', 'active']) {
+            const doc = await getListDocument(tab);
+            if (!doc) continue;
+            const links = doc.querySelectorAll('a[href*="orderdetails"], a[href*="order="]');
+            const seen = new Set();
+            for (const a of links) {
+                const href = a.getAttribute('href') || '';
+                const num = extractOrderNumberFromLink(href);
+                if (!num || seen.has(num)) continue;
+                seen.add(num);
+                const container = a.closest('section') || a.closest('[data-widget]') || a.parentElement;
+                if (!container) continue;
+                const html = container.innerHTML || '';
+                if (imageIds.some(id => html.indexOf(id) >= 0)) {
+                    Diagnostics.logParseResult(num, 'DOM.listPageMatch',
+                        'HTML списка (' + tab + '): совпадение по ID фото', num);
+                    return num;
+                }
+                if (dayNum && monthRu) {
+                    const text = (container.textContent || '').toLowerCase();
+                    if (text.indexOf(String(dayNum)) >= 0 && text.indexOf(monthRu) >= 0 && text.indexOf('получен') >= 0) {
+                        Diagnostics.logParseResult(num, 'DOM.listPageMatch',
+                            'HTML списка (' + tab + '): совпадение по дате получения', num);
+                        return num;
+                    }
+                }
+            }
+        }
+        Diagnostics.logParseResult('', 'DOM.listPageMiss',
+            'HTML списка: заказ плитки не найден', order.date || '');
+        return '';
+    }
+
     async function enrichOrdersWithProducts(orders, onProgress) {
         const controller = new AbortController();
         const CONCURRENCY = 2; // 2 одновременных запроса
+
+        // Плитки без номера: ищем тот же заказ в HTML списка (по фото/дате),
+        // затем — через мост в страничный мир. Без кликов и переходов.
+        let resolved = 0;
+        const MAX_RESOLVES = 5;
+        for (const order of orders) {
+            if (!order._partial || resolved >= MAX_RESOLVES) continue;
+            let num = await resolveTileFromListPages(order);
+            if (!num && typeof order._tileIndex === 'number') {
+                const res = await bridgeRequestOrderNumber(order._tileIndex, order._tileStatus || '');
+                if (res && res.orderNumber) num = res.orderNumber;
+            }
+            if (num) {
+                order.orderNumber = num;
+                order._partial = false;
+                order._source = order._source || 'list-page';
+                resolved++;
+                console.log(`[Ozon Copier] Плитка → номер заказа ${num}`);
+            }
+        }
 
         for (let i = 0; i < orders.length; i += CONCURRENCY) {
             const batch = orders.slice(i, i + CONCURRENCY);

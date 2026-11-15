@@ -897,10 +897,15 @@
         // плитки не видны из песочницы userscript.
         try {
             const pageDoc = getPageDocument();
-            pageDoc.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
+            const tiles = Array.from(pageDoc.querySelectorAll('section[data-widget="orderList"]'));
+            tiles.forEach((el, tileIndex) => {
                 const partial = parseNumberlessOrder(el);
                 if (!partial || seen.has(partial._domKey)) return;
                 seen.add(partial._domKey);
+                // Индекс/статус нужны мосту в страничный мир: он найдёт ту же
+                // плитку по порядку и прочитает её Vue-пропсы.
+                partial._tileIndex = tileIndex;
+                partial._tileStatus = (el.querySelector('.tsHeadline550Medium')?.textContent || '').trim();
                 orders.push(partial);
             });
         } catch(e) {
