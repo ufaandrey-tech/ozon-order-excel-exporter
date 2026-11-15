@@ -897,15 +897,10 @@
         // плитки не видны из песочницы userscript.
         try {
             const pageDoc = getPageDocument();
-            const tiles = Array.from(pageDoc.querySelectorAll('section[data-widget="orderList"]'));
-            tiles.forEach((el, tileIndex) => {
+            pageDoc.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
                 const partial = parseNumberlessOrder(el);
                 if (!partial || seen.has(partial._domKey)) return;
                 seen.add(partial._domKey);
-                // Индекс и статус нужны, чтобы позже (фаза enrich) вернуться
-                // к этой плитке и вытащить номер заказа кликом.
-                partial._tileIndex = tileIndex;
-                partial._tileStatus = (el.querySelector('.tsHeadline550Medium')?.textContent || '').trim();
                 orders.push(partial);
             });
         } catch(e) {
@@ -1093,128 +1088,6 @@
         }
     }
 
-    // Собирает заказы из ВСЕХ state-* элементов страницы. Ozon может держать
-    // отдельные виджеты для разных блоков (например, плитки завершённых
-    // заказов), а не только первый state-orderList. Ищем ordersV2 и любые
-    // объекты с leftBlock/rightBlock внутри data-state.
-    function harvestOrdersFromStates() {
-        const found = [];
-        try {
-            const els = document.querySelectorAll('[id^="state-"]');
-            els.forEach(el => {
-                let raw = '';
-                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
-                if (!raw || raw.length < 40) return;
-                if (raw.indexOf('orderdetails') < 0 && raw.indexOf('ordersV2') < 0) return;
-                let json;
-                try { json = JSON.parse(raw); } catch(e) { return; }
-
-                if (Array.isArray(json?.ordersV2)) {
-                    parseOrdersV2JSON(json.ordersV2).forEach(o => found.push(o));
-                }
-
-                // Универсальный обход: карточки заказа с той же схемой
-                // leftBlock/rightBlock могут лежать в неожиданном месте.
-                const visited = new Set();
-                let budget = 2000;
-                const walk = (v, depth) => {
-                    if (budget <= 0 || depth > 12 || !v || typeof v !== 'object') return;
-                    if (visited.has(v)) return;
-                    visited.add(v);
-                    budget--;
-                    if (v.leftBlock && v.rightBlock) {
-                        try {
-                            parseOrdersV2JSON([v]).forEach(o => found.push(o));
-                        } catch(e) {}
-                    }
-                    const keys = Array.isArray(v) ? v.keys() : Object.keys(v);
-                    for (const k of keys) {
-                        try { walk(v[k], depth + 1); } catch(e) {}
-                    }
-                };
-                walk(json, 0);
-            });
-        } catch(e) {
-            Diagnostics.logError('', 'harvestOrdersFromStates', '', e);
-        }
-        return found;
-    }
-
-    function sumOrderItems(order) {
-        let total = 0;
-        (order.items || []).forEach(it => {
-            const n = parseFloat(String(it.price || '').replace(',', '.'));
-            if (!isNaN(n)) total += n;
-        });
-        return total;
-    }
-
-    // Заполняет частичную плитку данными из state-* по совпадению даты
-    // (и ближайшей суммы). Возвращает число сопоставленных заказов.
-    function fillPartialOrdersFromStates(domOrders, harvested) {
-        const used = new Set();
-        let matched = 0;
-        (domOrders || []).forEach(tile => {
-            if (!tile._partial) return;
-            const tileSum = sumOrderItems(tile);
-            let best = null;
-            let bestDiff = Infinity;
-            (harvested || []).forEach(h => {
-                if (!h.orderNumber || used.has(h.orderNumber)) return;
-                const hDate = h.cardDeliveryDate || h.date || '';
-                if (!hDate || hDate !== tile.date) return;
-                const diff = Math.abs(sumOrderItems(h) - tileSum);
-                if (diff < bestDiff) { best = h; bestDiff = diff; }
-            });
-            if (!best) return;
-            used.add(best.orderNumber);
-            matched++;
-
-            tile.orderNumber = best.orderNumber;
-            tile._partial = false;
-            tile._source = 'state-harvest';
-            tile.date = tile.date || best.date;
-            tile.deliveryStatus = best.deliveryStatus || tile.deliveryStatus;
-            tile.pickupPoint = best.pickupPoint || '';
-            tile.paymentStatus = best.paymentStatus || '';
-            tile.fallbackAmount = best.fallbackAmount || tile.fallbackAmount;
-            if (best.items && best.items.length > 0) {
-                tile.items = best.items.map(it => Object.assign({}, it));
-            }
-            Diagnostics.logParseResult(best.orderNumber, 'DOM.stateHarvest',
-                'state-*: совпадение плитки по дате + сумме',
-                `${best.orderNumber}, ${best.cardDeliveryDate || best.date}, сумма ${best.fallbackAmount || '—'}`);
-        });
-        return matched;
-    }
-
-    function logStateInventory(partialDate) {
-        if (!Diagnostics.enabled) return;
-        try {
-            const inventory = [];
-            document.querySelectorAll('[id^="state-"]').forEach(el => {
-                if (inventory.length >= 20) return;
-                let raw = '';
-                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
-                if (!raw || raw.length < 40) return;
-                const hasLink = raw.indexOf('orderdetails') >= 0;
-                if (!hasLink && raw.indexOf('ordersV2') < 0) return;
-                inventory.push({
-                    id: (el.id || '').slice(0, 80),
-                    widget: (el.getAttribute('data-widget') || '').slice(0, 40),
-                    length: raw.length,
-                    hasOrderLink: hasLink
-                });
-            });
-            Diagnostics.logParseResult('', 'DOM.stateInventory',
-                'state-* с orderdetails/ordersV2 (id, widget, длина, есть ссылка)',
-                JSON.stringify(inventory));
-            Diagnostics.logParseResult('', 'DOM.partialDate', 'дата частичной плитки', partialDate || '');
-        } catch(e) {
-            Diagnostics.logError('', 'logStateInventory', '', e);
-        }
-    }
-
     // Дедупликация и объединение: JSON-заказы приоритетны, из DOM
     // добавляются только те номера, которых в JSON нет. Порядок —
     // сначала JSON (как на странице), затем DOM-карточки.
@@ -1237,26 +1110,6 @@
         // === Уровень 2: видимые карточки из DOM ===
         const domResult = parseOrdersFromDom();
         const domOrders = domResult.orders;
-
-        // === Уровень 3: сбор заказов из всех state-* элементов ===
-        // Пытаемся сопоставить «безымянные» плитки по дате и сумме.
-        // Если не получилось — номер достанем кликом в фазе enrich.
-        try {
-            const harvested = harvestOrdersFromStates();
-            if (harvested.length > 0) {
-                const matched = fillPartialOrdersFromStates(domOrders, harvested);
-                if (matched > 0) {
-                    console.log(`[Ozon Copier] state-*: сопоставлено плиток — ${matched}`);
-                }
-                if (domOrders.some(o => o._partial)) {
-                    logStateInventory((domOrders.find(o => o._partial) || {}).date);
-                }
-            } else if (domOrders.some(o => o._partial)) {
-                logStateInventory((domOrders.find(o => o._partial) || {}).date);
-            }
-        } catch(e) {
-            Diagnostics.logError('', 'parseOrders.harvest', '', e);
-        }
 
         // Заказы, которых нет в ordersV2 (например, завершённый заказ
         // в списке «Актуальные»), добавляем из DOM.

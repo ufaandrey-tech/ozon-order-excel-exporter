@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.21 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.20 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.21
-// @description  Копирует заказы Ozon v9.21: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.20
+// @description  Копирует заказы Ozon v9.20: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
@@ -305,7 +305,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.21';
+    const SCRIPT_VERSION = '9.20';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -2212,15 +2212,10 @@
         // плитки не видны из песочницы userscript.
         try {
             const pageDoc = getPageDocument();
-            const tiles = Array.from(pageDoc.querySelectorAll('section[data-widget="orderList"]'));
-            tiles.forEach((el, tileIndex) => {
+            pageDoc.querySelectorAll('section[data-widget="orderList"]').forEach(el => {
                 const partial = parseNumberlessOrder(el);
                 if (!partial || seen.has(partial._domKey)) return;
                 seen.add(partial._domKey);
-                // Индекс и статус нужны, чтобы позже (фаза enrich) вернуться
-                // к этой плитке и вытащить номер заказа кликом.
-                partial._tileIndex = tileIndex;
-                partial._tileStatus = (el.querySelector('.tsHeadline550Medium')?.textContent || '').trim();
                 orders.push(partial);
             });
         } catch(e) {
@@ -2408,128 +2403,6 @@
         }
     }
 
-    // Собирает заказы из ВСЕХ state-* элементов страницы. Ozon может держать
-    // отдельные виджеты для разных блоков (например, плитки завершённых
-    // заказов), а не только первый state-orderList. Ищем ordersV2 и любые
-    // объекты с leftBlock/rightBlock внутри data-state.
-    function harvestOrdersFromStates() {
-        const found = [];
-        try {
-            const els = document.querySelectorAll('[id^="state-"]');
-            els.forEach(el => {
-                let raw = '';
-                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
-                if (!raw || raw.length < 40) return;
-                if (raw.indexOf('orderdetails') < 0 && raw.indexOf('ordersV2') < 0) return;
-                let json;
-                try { json = JSON.parse(raw); } catch(e) { return; }
-
-                if (Array.isArray(json?.ordersV2)) {
-                    parseOrdersV2JSON(json.ordersV2).forEach(o => found.push(o));
-                }
-
-                // Универсальный обход: карточки заказа с той же схемой
-                // leftBlock/rightBlock могут лежать в неожиданном месте.
-                const visited = new Set();
-                let budget = 2000;
-                const walk = (v, depth) => {
-                    if (budget <= 0 || depth > 12 || !v || typeof v !== 'object') return;
-                    if (visited.has(v)) return;
-                    visited.add(v);
-                    budget--;
-                    if (v.leftBlock && v.rightBlock) {
-                        try {
-                            parseOrdersV2JSON([v]).forEach(o => found.push(o));
-                        } catch(e) {}
-                    }
-                    const keys = Array.isArray(v) ? v.keys() : Object.keys(v);
-                    for (const k of keys) {
-                        try { walk(v[k], depth + 1); } catch(e) {}
-                    }
-                };
-                walk(json, 0);
-            });
-        } catch(e) {
-            Diagnostics.logError('', 'harvestOrdersFromStates', '', e);
-        }
-        return found;
-    }
-
-    function sumOrderItems(order) {
-        let total = 0;
-        (order.items || []).forEach(it => {
-            const n = parseFloat(String(it.price || '').replace(',', '.'));
-            if (!isNaN(n)) total += n;
-        });
-        return total;
-    }
-
-    // Заполняет частичную плитку данными из state-* по совпадению даты
-    // (и ближайшей суммы). Возвращает число сопоставленных заказов.
-    function fillPartialOrdersFromStates(domOrders, harvested) {
-        const used = new Set();
-        let matched = 0;
-        (domOrders || []).forEach(tile => {
-            if (!tile._partial) return;
-            const tileSum = sumOrderItems(tile);
-            let best = null;
-            let bestDiff = Infinity;
-            (harvested || []).forEach(h => {
-                if (!h.orderNumber || used.has(h.orderNumber)) return;
-                const hDate = h.cardDeliveryDate || h.date || '';
-                if (!hDate || hDate !== tile.date) return;
-                const diff = Math.abs(sumOrderItems(h) - tileSum);
-                if (diff < bestDiff) { best = h; bestDiff = diff; }
-            });
-            if (!best) return;
-            used.add(best.orderNumber);
-            matched++;
-
-            tile.orderNumber = best.orderNumber;
-            tile._partial = false;
-            tile._source = 'state-harvest';
-            tile.date = tile.date || best.date;
-            tile.deliveryStatus = best.deliveryStatus || tile.deliveryStatus;
-            tile.pickupPoint = best.pickupPoint || '';
-            tile.paymentStatus = best.paymentStatus || '';
-            tile.fallbackAmount = best.fallbackAmount || tile.fallbackAmount;
-            if (best.items && best.items.length > 0) {
-                tile.items = best.items.map(it => Object.assign({}, it));
-            }
-            Diagnostics.logParseResult(best.orderNumber, 'DOM.stateHarvest',
-                'state-*: совпадение плитки по дате + сумме',
-                `${best.orderNumber}, ${best.cardDeliveryDate || best.date}, сумма ${best.fallbackAmount || '—'}`);
-        });
-        return matched;
-    }
-
-    function logStateInventory(partialDate) {
-        if (!Diagnostics.enabled) return;
-        try {
-            const inventory = [];
-            document.querySelectorAll('[id^="state-"]').forEach(el => {
-                if (inventory.length >= 20) return;
-                let raw = '';
-                try { raw = el.getAttribute('data-state') || ''; } catch(e) { return; }
-                if (!raw || raw.length < 40) return;
-                const hasLink = raw.indexOf('orderdetails') >= 0;
-                if (!hasLink && raw.indexOf('ordersV2') < 0) return;
-                inventory.push({
-                    id: (el.id || '').slice(0, 80),
-                    widget: (el.getAttribute('data-widget') || '').slice(0, 40),
-                    length: raw.length,
-                    hasOrderLink: hasLink
-                });
-            });
-            Diagnostics.logParseResult('', 'DOM.stateInventory',
-                'state-* с orderdetails/ordersV2 (id, widget, длина, есть ссылка)',
-                JSON.stringify(inventory));
-            Diagnostics.logParseResult('', 'DOM.partialDate', 'дата частичной плитки', partialDate || '');
-        } catch(e) {
-            Diagnostics.logError('', 'logStateInventory', '', e);
-        }
-    }
-
     // Дедупликация и объединение: JSON-заказы приоритетны, из DOM
     // добавляются только те номера, которых в JSON нет. Порядок —
     // сначала JSON (как на странице), затем DOM-карточки.
@@ -2552,26 +2425,6 @@
         // === Уровень 2: видимые карточки из DOM ===
         const domResult = parseOrdersFromDom();
         const domOrders = domResult.orders;
-
-        // === Уровень 3: сбор заказов из всех state-* элементов ===
-        // Пытаемся сопоставить «безымянные» плитки по дате и сумме.
-        // Если не получилось — номер достанем кликом в фазе enrich.
-        try {
-            const harvested = harvestOrdersFromStates();
-            if (harvested.length > 0) {
-                const matched = fillPartialOrdersFromStates(domOrders, harvested);
-                if (matched > 0) {
-                    console.log(`[Ozon Copier] state-*: сопоставлено плиток — ${matched}`);
-                }
-                if (domOrders.some(o => o._partial)) {
-                    logStateInventory((domOrders.find(o => o._partial) || {}).date);
-                }
-            } else if (domOrders.some(o => o._partial)) {
-                logStateInventory((domOrders.find(o => o._partial) || {}).date);
-            }
-        } catch(e) {
-            Diagnostics.logError('', 'parseOrders.harvest', '', e);
-        }
 
         // Заказы, которых нет в ordersV2 (например, завершённый заказ
         // в списке «Актуальные»), добавляем из DOM.
@@ -3079,143 +2932,9 @@
         return { items: [], address: '', error: 'таймаут загрузки деталей заказа' };
     }
 
-    // ============================================================
-    // 7c. РАЗРЕШЕНИЕ НОМЕРА ЗАКАЗА ДЛЯ «БЕЗЫМЯННЫХ» ПЛИТОК
-    // ============================================================
-    // Плитка завершённого заказа на «Актуальных» кликабельна, но ссылки
-    // в DOM нет. Кликаем по ней, ждём перехода на orderdetails, читаем
-    // номер из URL и возвращаемся назад. Это инвазивно (видно мерцание),
-    // зато даёт полные данные: номер → названия, количество, адрес ПВЗ.
-    const TILE_CLICK_NAV_TIMEOUT = 3500;
-    const TILE_CLICK_BACK_TIMEOUT = 7000;
-
-    function currentLocationKey() {
-        try { return location.pathname + location.search; } catch(e) { return ''; }
-    }
-
-    function orderNumberFromCurrentUrl() {
-        try { return extractOrderNumberFromLink(location.href); } catch(e) { return ''; }
-    }
-
-    function sleepMs(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    // Точка клика внутри плитки: берём элемент под центром/заголовком
-    // (обычно это невидимая ссылка-обёртка), пропуская кнопки действий.
-    async function getTileClickTarget(tile, pageDoc) {
-        try {
-            let rect = tile.getBoundingClientRect();
-            if (!rect || !rect.width || !rect.height) return null;
-            const needScroll = rect.top < 0 || rect.bottom > (window.innerHeight || 0);
-            if (needScroll) {
-                try { tile.scrollIntoView({ block: 'center' }); } catch(e) {}
-                await sleepMs(60);
-                rect = tile.getBoundingClientRect();
-            }
-            const points = [
-                [rect.left + rect.width * 0.35, rect.top + Math.min(28, rect.height / 2)],
-                [rect.left + rect.width * 0.5, rect.top + rect.height * 0.5]
-            ];
-            for (const [x, y] of points) {
-                const node = pageDoc.elementFromPoint(x, y);
-                if (!node) continue;
-                if (node.closest && node.closest('button')) continue;
-                return node;
-            }
-        } catch(e) {}
-        return null;
-    }
-
-    async function resolveTileOrderNumber(order) {
-        try {
-            const pageDoc = getPageDocument();
-            const tiles = Array.from(pageDoc.querySelectorAll('section[data-widget="orderList"]'));
-            let tile = (typeof order._tileIndex === 'number') ? tiles[order._tileIndex] : null;
-            // Проверка, что это та же плитка (после возврата список мог перерисоваться)
-            if (tile && order._tileStatus) {
-                const nowStatus = (tile.querySelector('.tsHeadline550Medium')?.textContent || '').trim();
-                if (nowStatus && nowStatus !== order._tileStatus) tile = null;
-            }
-            if (!tile && order._tileStatus) {
-                tile = tiles.find(el => ((el.querySelector('.tsHeadline550Medium')?.textContent || '').trim()) === order._tileStatus);
-            }
-            if (!tile) return '';
-
-            const startKey = currentLocationKey();
-            const pointTarget = await getTileClickTarget(tile, pageDoc);
-            const targets = [
-                pointTarget,
-                tile.querySelector('.tsHeadline550Medium'),
-                tile.querySelector('img'),
-                tile.querySelector('[class*="b5_7_11-a"]'),
-                tile
-            ].filter(Boolean);
-
-            let found = '';
-            for (const target of targets) {
-                if (found) break;
-                try { target.click(); } catch(e) {}
-                const deadline = Date.now() + TILE_CLICK_NAV_TIMEOUT;
-                while (Date.now() < deadline) {
-                    await sleepMs(100);
-                    const num = orderNumberFromCurrentUrl();
-                    if (num) { found = num; break; }
-                    // Ушли на другую страницу без номера — дальше кликать нечем
-                    if (currentLocationKey() !== startKey) break;
-                }
-            }
-
-            // Возврат к списку заказов
-            if (currentLocationKey() !== startKey) {
-                try { history.back(); } catch(e) {}
-                const backDeadline = Date.now() + TILE_CLICK_BACK_TIMEOUT;
-                while (Date.now() < backDeadline) {
-                    if (currentLocationKey() === startKey) break;
-                    await sleepMs(150);
-                }
-                // Ждём восстановления карточек после SPA-возврата
-                const renderDeadline = Date.now() + 4000;
-                while (Date.now() < renderDeadline) {
-                    try {
-                        if (pageDoc.querySelector('section[data-widget="orderList"]')) break;
-                    } catch(e) { break; }
-                    await sleepMs(150);
-                }
-            }
-
-            if (found) {
-                Diagnostics.logParseResult(found, 'DOM.clickResolve',
-                    'клик по плитке → URL orderdetails', found);
-            } else {
-                Diagnostics.logParseResult('', 'DOM.clickResolveFailed',
-                    'клик по плитке не дал orderNumber', order._domKey || '');
-            }
-            return found;
-        } catch(e) {
-            Diagnostics.logError(order.orderNumber || '', 'resolveTileOrderNumber', '', e);
-            return '';
-        }
-    }
-
     async function enrichOrdersWithProducts(orders, onProgress) {
         const controller = new AbortController();
         const CONCURRENCY = 2; // 2 одновременных запроса
-
-        // Плитки без номера: сначала пытаемся получить номер кликом.
-        let clickResolved = 0;
-        const MAX_CLICK_RESOLVES = 5;
-        for (const order of orders) {
-            if (!order._partial || clickResolved >= MAX_CLICK_RESOLVES) continue;
-            const num = await resolveTileOrderNumber(order);
-            if (num) {
-                order.orderNumber = num;
-                order._partial = false;
-                order._source = 'dom-tile-click';
-                clickResolved++;
-                console.log(`[Ozon Copier] Плитка → номер заказа ${num}`);
-            }
-        }
 
         for (let i = 0; i < orders.length; i += CONCURRENCY) {
             const batch = orders.slice(i, i + CONCURRENCY);
