@@ -97,4 +97,32 @@ for (const { name, m } of implementations) {
         const { address } = m.extractAddressFromDoc(doc, '00000000-0005');
         assert.strictEqual(address, '');
     });
+
+    test(`${name}: E5 detailsAddress — партнёрский ПВЗ «Пункт Партнера» → адрес извлечён`, () => {
+        const doc = {
+            querySelector() { return null; },
+            querySelectorAll(sel) {
+                if (sel === '[class*="b35"] .tsBody400Small, [class*="b35"] span, [class*="b35"] div') {
+                    return [fakeEl('Ростовская область, Пункт Партнера 1296255', 'tsBody400Small')];
+                }
+                return [];
+            }
+        };
+        const { address } = m.extractAddressFromDoc(doc, '00000000-0103');
+        assert.strictEqual(address, 'Ростовская область, Пункт Партнера 1296255');
+    });
+
+    test(`${name}: E5 detailsAddress — склейка лейбла и партнёрского адреса → адрес без лейбла`, () => {
+        const doc = {
+            querySelector() { return null; },
+            querySelectorAll(sel) {
+                if (sel === '[class*="b35"] .tsBody400Small, [class*="b35"] span, [class*="b35"] div') {
+                    return [fakeEl('Доставка в пункт выдачиРостовская область, Пункт Партнера 1296255', 'b35_6_4-b0 tsBody400Small')];
+                }
+                return [];
+            }
+        };
+        const { address } = m.extractAddressFromDoc(doc, '00000000-0104');
+        assert.strictEqual(address, 'Ростовская область, Пункт Партнера 1296255');
+    });
 }

@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.26';
+    const SCRIPT_VERSION = '9.27';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -3300,9 +3300,44 @@
                     if (/^Пункт\s+(Ozon|выдачи)\s*,?\s*.+/i.test(t)) { addrEl = el; break; }
                 }
             }
+            // 2b) Партнёрские ПВЗ: «Ростовская область, Пункт Партнера 1296255».
+            //    Адрес не начинается с «Пункт Ozon», поэтому шаг 2 его не ловит.
+            //    Приоритет — элемент без лейбла «Доставка в пункт выдачи».
+            if (!addrEl) {
+                const _partner = doc.querySelectorAll('[class*="b35"] .tsBody400Small, [class*="b35"] span, [class*="b35"] div');
+                const _matches = [];
+                for (const el of _partner) {
+                    const t = (el.textContent || '').trim();
+                    if (!t || t.length > 400) continue;
+                    if (/Пункт\s+Партн[её]ра/i.test(t)) _matches.push({ el, t });
+                }
+                const _clean = _matches.find(c => !/^Доставка\s+в\s+пункт\s+выдачи/i.test(c.t));
+                if (_clean) addrEl = _clean.el;
+                else if (_matches.length > 0) addrEl = _matches[0].el;
+            }
+            // 2c) Лейбл «Доставка в пункт выдачи» + адрес в соседнем элементе.
+            if (!addrEl) {
+                const _labels = doc.querySelectorAll('[class*="b35"] span, [class*="b35"] div');
+                for (const el of _labels) {
+                    const t = (el.textContent || '').trim();
+                    if (!/^Доставка\s+в\s+пункт\s+выдачи$/i.test(t)) continue;
+                    const next = el.nextElementSibling;
+                    if (next) {
+                        const nt = (next.textContent || '').trim();
+                        if (nt && nt.length <= 400) { addrEl = next; break; }
+                    }
+                    const parent = el.parentElement;
+                    if (parent) {
+                        const pt = (parent.textContent || '').trim();
+                        if (pt.length > t.length && pt.length <= 500) { addrEl = parent; break; }
+                    }
+                }
+            }
             // Более полный адрес: "Пункт Ozon, Россия, Ростовская, ..., 30"
             if (addrEl) {
-                const fullText = (addrEl.textContent || '').trim();
+                let fullText = (addrEl.textContent || '').trim();
+                // Убираем лейбл, если адрес склеен с ним («Доставка в пункт выдачиРостовская…»)
+                fullText = fullText.replace(/^Доставка\s+в\s+пункт\s+выдачи\s*/i, '').trim();
                 // Извлекаем после "Пункт Ozon, " — полный адрес
                 const m = fullText.match(/Пункт\s+Ozon[,\s]+(.+)/i);
                 detailsAddress = m ? m[1].trim() : fullText.replace(/^(Пункт\s+Ozon[,\s]*)/i, '');
@@ -3316,7 +3351,7 @@
             }
             // Диагностика: логируем результат извлечения адреса
             Diagnostics.logParseResult(orderNumber, 'detailsAddress',
-                'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → .tsCompactControl500Medium',
+                'каскад: .b35_5_3-b4 → .b35_5_2-b4 → .b35_5_1-b4 → [class*=b35] span{^Пункт (Ozon|выдачи)} → Пункт Партнера → лейбл «Доставка в пункт выдачи» → .tsCompactControl500Medium',
                 detailsAddress);
 
             // Диагностика: пробы DOM-селекторов для detailsAddress на orderdetails.
