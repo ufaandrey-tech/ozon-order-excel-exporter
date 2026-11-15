@@ -1181,6 +1181,41 @@
         return found;
     }
 
+    // Собирает заказы из window.__NUXT__ (SSR-пейлоад Nuxt). Плитки
+    // завершённых заказов рендерятся сервером и не имеют Vue-инстанса на
+    // DOM-узле, но данные приходят в Nuxt-пейлоаде.
+    function harvestOrdersFromNuxt() {
+        const found = [];
+        try {
+            if (typeof window === 'undefined') return found;
+            const candidates = [window.__NUXT__, window.__INITIAL_STATE__, window.__APOLLO_STATE__];
+            candidates.forEach(root => {
+                if (!root || typeof root !== 'object') return;
+                const visited = new Set();
+                let budget = 12000;
+                const walk = (v, depth) => {
+                    if (budget <= 0 || depth > 16 || !v || typeof v !== 'object') return;
+                    if (visited.has(v)) return;
+                    visited.add(v);
+                    budget--;
+                    if (v.leftBlock && v.rightBlock) {
+                        try {
+                            parseOrdersV2JSON([v]).forEach(o => found.push(o));
+                        } catch(e) {}
+                    }
+                    const keys = Array.isArray(v) ? v.keys() : Object.keys(v);
+                    for (const k of keys) {
+                        try { walk(v[k], depth + 1); } catch(e) {}
+                    }
+                };
+                walk(root, 0);
+            });
+        } catch(e) {
+            Diagnostics.logError('', 'harvestOrdersFromNuxt', '', e);
+        }
+        return found;
+    }
+
     function sumOrderItems(order) {
         let total = 0;
         (order.items || []).forEach(it => {
@@ -1251,6 +1286,39 @@
                 'state-* с orderdetails/ordersV2 (id, widget, длина, есть ссылка)',
                 JSON.stringify(inventory));
             Diagnostics.logParseResult('', 'DOM.partialDate', 'дата частичной плитки', partialDate || '');
+            let nuxtInfo = 'нет';
+            try {
+                if (typeof window !== 'undefined' && window.__NUXT__ && typeof window.__NUXT__ === 'object') {
+                    nuxtInfo = JSON.stringify(Object.keys(window.__NUXT__).slice(0, 20));
+                }
+            } catch(e) { nuxtInfo = 'ошибка чтения'; }
+            Diagnostics.logParseResult('', 'DOM.nuxtKeys', 'window.__NUXT__ (верхний уровень)', nuxtInfo);
+
+            // Инвентарь Vue-инстансов: где вообще лежат компоненты
+            const vueSamples = [];
+            let vueCount = 0;
+            try {
+                const all = document.querySelectorAll('body *');
+                all.forEach(el => {
+                    let keys;
+                    try { keys = Object.keys(el); } catch(e) { return; }
+                    const hit = keys.filter(k => k === '__vue__' || k === '__vueParentComponent'
+                        || k === '__vnode' || k === '_vnode' || k === '__vue_app__');
+                    if (!hit.length) return;
+                    vueCount++;
+                    if (vueSamples.length < 10) {
+                        vueSamples.push({
+                            tag: el.tagName,
+                            id: (el.id || '').slice(0, 40),
+                            cls: (typeof el.className === 'string' ? el.className : '').slice(0, 60),
+                            keys: hit
+                        });
+                    }
+                });
+            } catch(e) {}
+            Diagnostics.logParseResult('', 'DOM.vueInventory',
+                'элементы с Vue-ключами (всего / примеры)',
+                JSON.stringify({ total: vueCount, samples: vueSamples }));
         } catch(e) {
             Diagnostics.logError('', 'logStateInventory', '', e);
         }
@@ -1282,7 +1350,7 @@
         // === Уровень 3: сбор заказов из всех state-* элементов ===
         // Сопоставляем «безымянные» плитки по дате и сумме. Без кликов.
         try {
-            const harvested = harvestOrdersFromStates();
+            const harvested = harvestOrdersFromStates().concat(harvestOrdersFromNuxt());
             if (harvested.length > 0) {
                 const matched = fillPartialOrdersFromStates(domOrders, harvested);
                 if (matched > 0) {
