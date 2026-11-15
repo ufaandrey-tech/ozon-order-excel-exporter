@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         📋 Ozon Order Copier v9.18 (мульти-отправления + COMPOSER_ACTION)
+// @name         📋 Ozon Order Copier v9.19 (мульти-отправления + COMPOSER_ACTION)
 // @namespace    http://tampermonkey.net/
-// @version      9.18
-// @description  Копирует заказы Ozon v9.18: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
+// @version      9.19
+// @description  Копирует заказы Ozon v9.19: JSON-first + обработка составных заказов (BEHAVIOR_TYPE_COMPOSER_ACTION с base64 data).
 // @author       Volunteer Helper
 // @match        https://www.ozon.ru/my/orderlist*
 // @match        https://ozon.ru/my/orderlist*
@@ -304,7 +304,7 @@
 // карты встроены прямо в функции (normalizeStatus, pickBestPaymentStatus и др.)
 // и переносятся вместе с ними без изменений.
 
-    const SCRIPT_VERSION = '9.18';
+    const SCRIPT_VERSION = '9.19';
 // ============================================================
 // СЕКЦИЯ: src/core/utils.js
 // Источник: ozon-orders-copier.user.js — блок «1c. УТИЛИТЫ»,
@@ -2226,9 +2226,74 @@
 
     // Карточка завершённого заказа в списке «Актуальные» может быть
     // плиткой без ссылки на orderdetails и без номера заказа: Ozon не
-    // отдаёт номер ни в DOM, ни в state-orderList. Такие плитки нельзя
-    // обогатить деталями, но можно выгрузить частично (дата, статус,
-    // цены и фото товаров), чтобы заказ не пропадал из файла.
+    // отдаёт номер ни в DOM, ни в state-orderList. Плитка кликабельна,
+    // и ссылка на заказ обычно лежит в React-пропсах (Link/action.link).
+    // Достаём её обходом fiber-дерева — без клика и перехода. Если не
+    // получилось — выгружаем частично (дата, статус, цены и фото).
+    function scanPropsForOrderLink(props, depth, budget) {
+        if (!props || depth > 6 || budget.left <= 0) return '';
+        const type = typeof props;
+        if (type === 'string') {
+            return extractOrderNumberFromLink(props);
+        }
+        if (type !== 'object') return '';
+        if (budget.seen.has(props)) return '';
+        budget.seen.add(props);
+
+        let keys;
+        try {
+            keys = Array.isArray(props) ? props.keys() : Object.keys(props);
+        } catch(e) {
+            return '';
+        }
+        for (const k of keys) {
+            if (budget.left <= 0) break;
+            if (k === 'stateNode' || k === 'return' || k === 'child' || k === 'sibling'
+                || k === 'alternate' || k === '_owner' || k === 'ref') continue;
+            budget.left--;
+            let v;
+            try { v = props[k]; } catch(e) { continue; }
+            if (typeof v === 'function') continue;
+            const found = scanPropsForOrderLink(v, depth + 1, budget);
+            if (found) return found;
+        }
+        return '';
+    }
+
+    // Ищет номер заказа в React-пропсах самой плитки и ближайших родителей.
+    // Обход идёт только вверх по fiber.return (props компонентов-обёрток),
+    // поэтому в чужие карточки списка не попадает.
+    function findOrderNumberInReactProps(el) {
+        try {
+            let node = el;
+            for (let domDepth = 0; node && domDepth < 4; domDepth++, node = node.parentElement) {
+                let keys;
+                try { keys = Object.keys(node); } catch(e) { continue; }
+
+                const fiberKey = keys.find(k => k.startsWith('__reactFiber$')
+                    || k.startsWith('__reactInternalInstance$'));
+                if (fiberKey) {
+                    let fiber = node[fiberKey];
+                    for (let up = 0; fiber && up < 5; up++, fiber = fiber.return) {
+                        for (const pk of ['memoizedProps', 'pendingProps']) {
+                            const budget = { left: 400, seen: new Set() };
+                            const num = scanPropsForOrderLink(fiber[pk], 0, budget);
+                            if (num) return num;
+                        }
+                    }
+                }
+
+                const propsKey = keys.find(k => k.startsWith('__reactProps$'));
+                if (propsKey) {
+                    const budget = { left: 400, seen: new Set() };
+                    const num = scanPropsForOrderLink(node[propsKey], 0, budget);
+                    if (num) return num;
+                }
+            }
+        } catch(e) {}
+        return '';
+    }
+
     function parseNumberlessOrder(card) {
         try {
             const statusEl = card.querySelector('.tsHeadline550Medium');
@@ -2244,6 +2309,9 @@
 
             const status = normalizeStatus(statusRaw);
             const date = parseRussianDate(statusRaw);
+
+            // Номер заказа из React-пропсов кликабельной плитки.
+            const reactOrderNumber = findOrderNumberInReactProps(card);
 
             // Фото товаров (плитка показывает только изображения и цены)
             const pictures = [];
@@ -2282,10 +2350,10 @@
             });
 
             const order = {
-                orderNumber: '',
+                orderNumber: reactOrderNumber || '',
                 _domKey: 'tile:' + statusRaw + ':' + prices.join('|') + ':' + (pictures[0] || ''),
-                _partial: true,
-                _source: 'dom-tile',
+                _partial: !reactOrderNumber,
+                _source: reactOrderNumber ? 'dom-tile-react' : 'dom-tile',
                 date,
                 deliveryStatus: status,
                 items,
@@ -2294,9 +2362,20 @@
                 pickupPoint: '',
                 cardDeliveryDate: date
             };
-            Diagnostics.logParseResult('', 'DOM.partialOrder',
-                'плитка без № заказа: .tsHeadline550Medium + img + .tsHeadline400Small',
-                `${order.deliveryStatus} ${order.date}, товаров: ${items.length}, сумма: ${order.fallbackAmount || '—'}`);
+            if (reactOrderNumber) {
+                Diagnostics.logParseResult(reactOrderNumber, 'DOM.reactOrderNumber',
+                    'кликабельная плитка: __reactFiber__.__reactProps__ → orderNumber',
+                    reactOrderNumber);
+            } else {
+                let hasReact = false;
+                try {
+                    hasReact = Object.keys(card).some(k => k.startsWith('__reactFiber$')
+                        || k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance$'));
+                } catch(e) {}
+                Diagnostics.logParseResult('', 'DOM.partialOrder',
+                    `плитка без № заказа (React-пропсы: ${hasReact ? 'есть, ссылка не найдена' : 'нет'})`,
+                    `${order.deliveryStatus} ${order.date}, товаров: ${items.length}, сумма: ${order.fallbackAmount || '—'}`);
+            }
             return order;
         } catch(e) {
             Diagnostics.logError('', 'parseNumberlessOrder', '', e);
