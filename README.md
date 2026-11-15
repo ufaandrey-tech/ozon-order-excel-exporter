@@ -112,7 +112,7 @@ python generate_template.py
 
 | Путь | Назначение |
 |---|---|
-| [`src/core/`](src/core/) | **Ядро** — 12 секций: constants, utils, net, dates, statuses, prices, diagnostics, bridge, parse, fetch, export-tsv, export-xlsx. Порядок секций задаёт [`src/core/index.js`](src/core/index.js) |
+| [`src/core/`](src/core/) | **Ядро** — 11 секций: constants, utils, net, dates, statuses, prices, diagnostics, parse, fetch, export-tsv, export-xlsx. Порядок секций задаёт [`src/core/index.js`](src/core/index.js) |
 | [`src/platforms/`](src/platforms/) | **Тонкие обёртки платформ**: [`userscript.js`](src/platforms/userscript.js) (шапка `==UserScript==`, GM-стили, `GM_setClipboard`) и [`extension.js`](src/platforms/extension.js) (header, `STYLE_CSS`, инжекция, `navigator.clipboard`) |
 | [`src/ui/ui.js`](src/ui/ui.js) | **Общий UI** — кнопки, предпросмотр, toast, init (единый для обеих платформ) |
 | [`build/build.js`](build/build.js) | **Скрипт сборки** — читает `src/`, подставляет версию, собирает артефакты в `dist/` |
@@ -147,8 +147,8 @@ npm test        # pretest автоматически собирает dist/, з�
 
 ```
 ├── src/                          # Исходники (единый источник истины)
-│   ├── core/                     #   Ядро — 12 секций (порядок в src/core/index.js)
-│   │   ├── index.js              #     Порядок секций ядра (12 модулей для сборки)
+│   ├── core/                     #   Ядро — 11 секций (порядок в src/core/index.js)
+│   │   ├── index.js              #     Порядок секций ядра (11 модулей для сборки)
 │   │   ├── constants.js          #     SCRIPT_VERSION — единственная точка версии
 │   │   ├── utils.js              #     Утилиты (escapeHtml, backoffDelay, dedupe…)
 │   │   ├── net.js                #     Сеть (fetchWithTimeout, fetchImage…)
@@ -201,7 +201,21 @@ npm test        # pretest автоматически собирает dist/, з�
 │   ├── v9.24.md
 │   ├── v9.25.md
 │   ├── v9.26.md
-│   └── v9.27.md
+│   ├── v9.27.md
+│   ├── v9.28.md
+│   ├── v9.29.md
+│   ├── v9.30.md
+│   ├── v9.31.md
+│   ├── v9.32.md
+│   ├── v9.33.md
+│   ├── v9.34.md
+│   ├── v9.35.md
+│   ├── v9.36.md
+│   ├── v9.37.md
+│   ├── v9.38.md
+│   ├── v9.39.md
+│   ├── v9.40.md
+│   └── v9.41.md
 └── plans/                        # Внутренние планы разработки (не для пользователей)
 ```
 
@@ -214,7 +228,7 @@ npm test        # pretest автоматически собирает dist/, з�
 | 1.1.1 | 9.14 | Предыдущий релиз |
 | 1.2.0 | 9.15 | Историческая альтернатива (не выпускалась, версия расширения синхронизирована в 9.15) |
 | 9.15 | 9.15 | Предыдущий релиз — единая версия из `src/core/constants.js` |
-| **9.27** | **9.27** | **Текущий релиз — единая версия из `src/core/constants.js`** |
+| **9.41** | **9.41** | **Текущий релиз — единая версия из `src/core/constants.js`** |
 
 ## 🔒 Приватность
 
@@ -245,4 +259,4 @@ npm test        # pretest автоматически собирает dist/, з�
 
 ---
 
-> **Версия:** 9.27 | **Обновлено:** 15 ноября 2026
+> **Версия:** 9.41 | **Обновлено:** 15 ноября 2026

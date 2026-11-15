@@ -13,7 +13,6 @@ module.exports = [
     'statuses',
     'prices',
     'diagnostics',
-    'bridge',
     'parse',
     'fetch',
     'export-tsv',

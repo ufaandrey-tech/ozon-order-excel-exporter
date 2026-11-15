@@ -200,7 +200,7 @@
         installPageBridge();
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         if (!bridgeReady) {
-            for (let i = 0; i < 10 && !bridgeReady; i++) {
+            for (let i = 0; i < 6 && !bridgeReady; i++) {
                 await sleep(100);
             }
         }
@@ -217,7 +217,7 @@
                     bridgePending.delete(id);
                     resolve(null);
                 }
-            }, 3000);
+            }, 1800);
             try {
                 window.postMessage({ __ozonCopier: 'req', id: id, index: index, status: status }, '*');
             } catch(e) {
@@ -226,7 +226,7 @@
             }
         });
         if (!response) {
-            Diagnostics.logParseResult('', 'DOM.bridgeTimeout', 'мост не ответил за 3 с', '');
+            Diagnostics.logParseResult('', 'DOM.bridgeTimeout', 'мост не ответил за 1.8 с', '');
             return null;
         }
         if (response.orderNumber) {

@@ -507,120 +507,15 @@
     }
 
     // ============================================================
-    // 7d. ПОИСК НОМЕРА ПЛИТКИ ПО HTML СПИСКА ЗАКАЗОВ
+    // 7c. ОБОГАЩЕНИЕ ЗАКАЗОВ ДАННЫМИ ИЗ orderdetails
     // ============================================================
-    // Плитка завершённого заказа не содержит номера. Но тот же заказ есть
-    // в списке (SSR/архив), где у карточек бывают ссылки. Подтягиваем HTML
-    // списка и ищем карточку по ID фотографий товаров (надёжнее даты).
-    const listDocCache = new Map();
-
-    async function getListDocument(tab) {
-        if (listDocCache.has(tab)) return listDocCache.get(tab);
-        const promise = (async () => {
-            try {
-                const url = tab === 'archive'
-                    ? '/my/orderlist?selectedTab=archive'
-                    : '/my/orderlist?selectedTab=active';
-                const resp = await fetchWithTimeout(url, { ms: 20000, credentials: 'include' });
-                if (!resp.ok) return null;
-                const html = await resp.text();
-                return new DOMParser().parseFromString(html, 'text/html');
-            } catch(e) {
-                return null;
-            }
-        })();
-        listDocCache.set(tab, promise);
-        return promise;
-    }
-
-    function imageIdFromUrl(url) {
-        const m = String(url || '').match(/\/(\d{6,})(?:\.(?:jpe?g|png|webp))?(?:[?#]|$)/i)
-            || String(url || '').match(/\/(\d{6,})\//);
-        return m ? m[1] : '';
-    }
-
-    // Контейнер карточки: ближайший предок ссылки, внутри которого ровно
-    // один номер заказа. Иначе closest('section') может захватить весь
-    // список — тогда «совпадение по фото» ложно срабатывает на чужой заказ.
-    function cardContainerForLink(link) {
-        let node = link;
-        let best = link.parentElement;
-        for (let depth = 0; node && depth < 14; depth++, node = node.parentElement) {
-            let links;
-            try { links = node.querySelectorAll('a[href*="orderdetails"], a[href*="order="]'); } catch(e) { break; }
-            const numbers = new Set();
-            links.forEach(a => {
-                const n = extractOrderNumberFromLink(a.getAttribute('href') || '');
-                if (n) numbers.add(n);
-            });
-            if (numbers.size > 1) break;
-            best = node;
-        }
-        return best;
-    }
-
-    async function resolveTileFromListPages(order) {
-        const pictures = (order.items || []).map(it => it.picture).filter(Boolean);
-        const imageIds = pictures.map(imageIdFromUrl).filter(Boolean);
-        if (imageIds.length === 0) {
-            Diagnostics.logParseResult('', 'DOM.listPageMiss',
-                'HTML списка: у плитки нет фото для сопоставления', order.date || '');
-            return '';
-        }
-        const required = Math.min(2, imageIds.length);
-
-        for (const tab of ['archive', 'active']) {
-            const doc = await getListDocument(tab);
-            if (!doc) continue;
-            const links = doc.querySelectorAll('a[href*="orderdetails"], a[href*="order="]');
-            const seen = new Set();
-            for (const a of links) {
-                const href = a.getAttribute('href') || '';
-                const num = extractOrderNumberFromLink(href);
-                if (!num || seen.has(num)) continue;
-                seen.add(num);
-                const container = cardContainerForLink(a);
-                if (!container) continue;
-                const html = container.innerHTML || '';
-                let matches = 0;
-                imageIds.forEach(id => { if (html.indexOf(id) >= 0) matches++; });
-                if (matches >= required) {
-                    Diagnostics.logParseResult(num, 'DOM.listPageMatch',
-                        'HTML списка (' + tab + '): совпадений фото ' + matches + '/' + imageIds.length,
-                        num);
-                    return num;
-                }
-            }
-        }
-        Diagnostics.logParseResult('', 'DOM.listPageMiss',
-            'HTML списка: заказ плитки не найден по фото', order.date || '');
-        return '';
-    }
 
     async function enrichOrdersWithProducts(orders, onProgress) {
         const controller = new AbortController();
         const CONCURRENCY = 2; // 2 одновременных запроса
 
-        // Плитки без номера: ищем тот же заказ в HTML списка (по фото/дате),
-        // затем — через мост в страничный мир. Без кликов и переходов.
-        let resolved = 0;
-        const MAX_RESOLVES = 5;
-        for (const order of orders) {
-            if (!order._partial || resolved >= MAX_RESOLVES) continue;
-            let num = await resolveTileFromListPages(order);
-            if (!num && typeof order._tileIndex === 'number') {
-                const res = await bridgeRequestOrderNumber(order._tileIndex, order._tileStatus || '');
-                if (res && res.orderNumber) num = res.orderNumber;
-            }
-            if (num) {
-                order.orderNumber = num;
-                order._partial = false;
-                order._source = order._source || 'list-page';
-                resolved++;
-                console.log(`[Ozon Copier] Плитка → номер заказа ${num}`);
-            }
-        }
-
+        // Плитки без номера заказа остаются частичными (дата, статус, цены, фото).
+        // Номер у них не извлекается детерминированно: в HTML/JSON его нет.
         for (let i = 0; i < orders.length; i += CONCURRENCY) {
             const batch = orders.slice(i, i + CONCURRENCY);
             const results = await Promise.all(

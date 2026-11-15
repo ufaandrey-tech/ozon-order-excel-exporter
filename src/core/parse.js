@@ -847,8 +847,13 @@
             cards = document.querySelectorAll(sel);
             if (cards.length > 0) break;
         }
+        // Скрытые вкладки («Завершённые») остаются в DOM рядом с «Актуальными».
+        // Берём только видимые карточки — иначе в экспорт попадают десятки
+        // чужих заказов и файл раздувается.
+        cards = Array.from(cards).filter(isElementVisible);
+        const hiddenSkipped = [];
         const usedSelectors = cards.length > 0;
-        const containers = new Set(Array.from(cards));
+        const containers = new Set(cards);
 
         // Структурный поиск по ссылкам: нужен не только как fallback, но и
         // как дополнение — карточка другого типа (например, завершённый заказ)
@@ -865,17 +870,30 @@
                 const container = a.closest('section')
                     || a.closest('[data-widget]')
                     || a.closest('[class*="_11"]');
-                if (container) containers.add(container);
+                if (!container) return;
+                if (!isElementVisible(container)) {
+                    hiddenSkipped.push(container);
+                    return;
+                }
+                containers.add(container);
             });
         } catch(e) {}
 
         // Последний fallback: старый контейнер .x3d_11
         if (containers.size === 0) {
             const container = document.querySelector('.x3d_11');
-            if (container) {
+            if (container && isElementVisible(container)) {
                 const items = container.querySelectorAll(':scope > div');
-                if (items.length > 0) Array.from(items).forEach(el => containers.add(el));
+                if (items.length > 0) Array.from(items).forEach(el => {
+                    if (isElementVisible(el)) containers.add(el);
+                });
             }
+        }
+
+        if (hiddenSkipped.length > 0) {
+            Diagnostics.logParseResult('', 'DOM.hiddenSkipped',
+                'скрытые карточки (другая вкладка) пропущены',
+                String(hiddenSkipped.length));
         }
 
         // Дедупликация внутри DOM: один и тот же номер мог быть извлечён
@@ -898,14 +916,11 @@
         try {
             const pageDoc = getPageDocument();
             const tiles = Array.from(pageDoc.querySelectorAll('section[data-widget="orderList"]'));
-            tiles.forEach((el, tileIndex) => {
+            tiles.forEach(el => {
+                if (!isElementVisible(el)) return;
                 const partial = parseNumberlessOrder(el);
                 if (!partial || seen.has(partial._domKey)) return;
                 seen.add(partial._domKey);
-                // Индекс/статус нужны мосту в страничный мир: он найдёт ту же
-                // плитку по порядку и прочитает её Vue-пропсы.
-                partial._tileIndex = tileIndex;
-                partial._tileStatus = (el.querySelector('.tsHeadline550Medium')?.textContent || '').trim();
                 orders.push(partial);
             });
         } catch(e) {
@@ -916,6 +931,16 @@
         // только если контейнеры пришли ровно из CARD_SELECTORS без добавок.
         const paymentGridSafe = usedSelectors && containers.size === cards.length;
         return { orders, paymentGridSafe };
+    }
+
+    function isElementVisible(el) {
+        try {
+            if (!el || typeof el.getBoundingClientRect !== 'function') return true;
+            const rect = el.getBoundingClientRect();
+            return !!(rect && rect.width > 2 && rect.height > 2);
+        } catch(e) {
+            return true;
+        }
     }
 
     // Карточка завершённого заказа в списке «Актуальные» может быть
