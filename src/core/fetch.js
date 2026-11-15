@@ -504,18 +504,35 @@
         return m ? m[1] : '';
     }
 
-    function monthNameRu(month) {
-        const names = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-            'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-        return names[month - 1] || '';
+    // Контейнер карточки: ближайший предок ссылки, внутри которого ровно
+    // один номер заказа. Иначе closest('section') может захватить весь
+    // список — тогда «совпадение по фото» ложно срабатывает на чужой заказ.
+    function cardContainerForLink(link) {
+        let node = link;
+        let best = link.parentElement;
+        for (let depth = 0; node && depth < 14; depth++, node = node.parentElement) {
+            let links;
+            try { links = node.querySelectorAll('a[href*="orderdetails"], a[href*="order="]'); } catch(e) { break; }
+            const numbers = new Set();
+            links.forEach(a => {
+                const n = extractOrderNumberFromLink(a.getAttribute('href') || '');
+                if (n) numbers.add(n);
+            });
+            if (numbers.size > 1) break;
+            best = node;
+        }
+        return best;
     }
 
     async function resolveTileFromListPages(order) {
         const pictures = (order.items || []).map(it => it.picture).filter(Boolean);
         const imageIds = pictures.map(imageIdFromUrl).filter(Boolean);
-        const dateMatch = String(order.date || '').match(/^(\d{1,2})\.(\d{2})\.(\d{4})$/);
-        const dayNum = dateMatch ? parseInt(dateMatch[1], 10) : 0;
-        const monthRu = dateMatch ? monthNameRu(parseInt(dateMatch[2], 10)) : '';
+        if (imageIds.length === 0) {
+            Diagnostics.logParseResult('', 'DOM.listPageMiss',
+                'HTML списка: у плитки нет фото для сопоставления', order.date || '');
+            return '';
+        }
+        const required = Math.min(2, imageIds.length);
 
         for (const tab of ['archive', 'active']) {
             const doc = await getListDocument(tab);
@@ -527,26 +544,21 @@
                 const num = extractOrderNumberFromLink(href);
                 if (!num || seen.has(num)) continue;
                 seen.add(num);
-                const container = a.closest('section') || a.closest('[data-widget]') || a.parentElement;
+                const container = cardContainerForLink(a);
                 if (!container) continue;
                 const html = container.innerHTML || '';
-                if (imageIds.some(id => html.indexOf(id) >= 0)) {
+                let matches = 0;
+                imageIds.forEach(id => { if (html.indexOf(id) >= 0) matches++; });
+                if (matches >= required) {
                     Diagnostics.logParseResult(num, 'DOM.listPageMatch',
-                        'HTML списка (' + tab + '): совпадение по ID фото', num);
+                        'HTML списка (' + tab + '): совпадений фото ' + matches + '/' + imageIds.length,
+                        num);
                     return num;
-                }
-                if (dayNum && monthRu) {
-                    const text = (container.textContent || '').toLowerCase();
-                    if (text.indexOf(String(dayNum)) >= 0 && text.indexOf(monthRu) >= 0 && text.indexOf('получен') >= 0) {
-                        Diagnostics.logParseResult(num, 'DOM.listPageMatch',
-                            'HTML списка (' + tab + '): совпадение по дате получения', num);
-                        return num;
-                    }
                 }
             }
         }
         Diagnostics.logParseResult('', 'DOM.listPageMiss',
-            'HTML списка: заказ плитки не найден', order.date || '');
+            'HTML списка: заказ плитки не найден по фото', order.date || '');
         return '';
     }
 
